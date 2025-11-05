@@ -8,6 +8,8 @@ import tempfile
 from ultralytics import YOLO
 import datetime
 from text import FreeFireTextDetector
+import queue
+import threading
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 os.environ.setdefault('OMP_NUM_THREADS', '1')
@@ -29,9 +31,19 @@ class KillblockDetector:
         self.cap = None
         self.camera_initialized = False
         self.detection_sequence = 0  # Sequential counter to ensure chronological order
+        
+        # Thread-safe image saving system
+        self.save_queue = queue.Queue(maxsize=1000)  # Thread-safe queue for processed images
+        self.save_thread = None
+        self.save_thread_running = False
+        self.detected_count = 0  # Total frames detected
+        self.saved_count = 0  # Total frames successfully saved
+        self.failed_count = 0  # Total frames that failed to save
+        
         print("Detector ready!")
     
     def __del__(self):
+        self.stop_save_thread()
         self.cleanup_camera()
     
     def load_model(self):
@@ -610,7 +622,7 @@ class KillblockDetector:
             # Apply color splash effect (selective color - grayscale except text/icons)
             cropped_image_colorsplash = self.apply_color_splash(cropped_image)
             
-            # Save color splash version with simple order number (no timestamp)
+            # Prepare for non-blocking save via background thread
             # Format: ORDER_KILLER STATUS VICTIM.png
             # Simple order number (3 digits) shows capture sequence and helps identify missed frames
             output_dir = "cropkillblock"
@@ -622,16 +634,47 @@ class KillblockDetector:
             filename = f"{sequence_number:03d}_{killer_name} {status} {victim_name}.png"
             filepath = os.path.join(output_dir, filename)
             
-            # Synchronous file write to ensure strict chronological order
-            # Files are saved in the exact order they are detected and processed
-            # Order number shows capture sequence and ensures proper ordering
-            if cv2.imwrite(filepath, cropped_image_colorsplash):
-                print(f"📸 Saved (Color Splash): {filename}")
+            # Non-blocking enqueue for background save thread
+            # Queue ensures strict chronological order - FIFO guarantees earlier detections saved first
+            # Increment detected count before enqueueing
+            self.detected_count += 1
+            
+            # Prepare metadata for save thread
+            metadata = {
+                'killer_name': killer_name,
+                'victim_name': victim_name,
+                'status': status,
+                'confidence': detection['confidence'],
+                'sequence_number': sequence_number,
+                'frame_number': frame_number
+            }
+            
+            # Enqueue for background save (non-blocking)
+            try:
+                # Put item in queue (non-blocking with timeout to prevent blocking)
+                # If queue is full, wait briefly then try again
+                self.save_queue.put((cropped_image_colorsplash.copy(), filepath, metadata), timeout=0.1)
+                print(f"📤 Enqueued for save: {filename}")
                 print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
                 print(f"   📊 Status: {status} | 📈 Confidence: {detection['confidence']:.2f}")
-                print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})\n")
+                print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})")
+                print(f"   💾 Queue size: {self.save_queue.qsize()} | Detected: {self.detected_count}\n")
                 return True
-            return False
+            except queue.Full:
+                # Queue is full - this should not happen often, but if it does, retry once
+                print(f"⚠️ Save queue full, retrying...")
+                try:
+                    self.save_queue.put((cropped_image_colorsplash.copy(), filepath, metadata), timeout=1.0)
+                    print(f"📤 Enqueued for save (retry): {filename}\n")
+                    return True
+                except queue.Full:
+                    print(f"❌ Failed to enqueue - queue still full: {filename}\n")
+                    self.failed_count += 1
+                    return False
+            except Exception as e:
+                print(f"⚠️ Enqueue error: {e}")
+                self.failed_count += 1
+                return False
         except Exception as e:
             print(f"⚠️ Processing error: {e}")
             return False
@@ -706,6 +749,110 @@ class KillblockDetector:
             self.camera_initialized = False
         except:
             pass
+    
+    def save_worker_thread(self):
+        """Background thread worker that saves images from the queue with retry logic."""
+        max_retries = 3
+        retry_delay = 0.1  # 100ms between retries
+        
+        while self.save_thread_running or not self.save_queue.empty():
+            try:
+                # Get item from queue with timeout to check running flag
+                try:
+                    item = self.save_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                
+                # Unpack queue item: (image, filepath, metadata)
+                image, filepath, metadata = item
+                
+                # Retry logic for file writing
+                saved = False
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        if cv2.imwrite(filepath, image):
+                            saved = True
+                            self.saved_count += 1
+                            break
+                        else:
+                            # cv2.imwrite returns False on failure
+                            last_error = "cv2.imwrite returned False"
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    except Exception as e:
+                        last_error = str(e)
+                        if attempt < max_retries - 1:
+                            print(f"⚠️ Save attempt {attempt+1}/{max_retries} failed: {e}, retrying...")
+                            time.sleep(retry_delay * (attempt + 1))
+                        else:
+                            print(f"❌ Save failed after {max_retries} attempts: {e}")
+                
+                if saved:
+                    # Print success message with metadata
+                    killer_name = metadata.get('killer_name', '')
+                    victim_name = metadata.get('victim_name', '')
+                    status = metadata.get('status', '')
+                    confidence = metadata.get('confidence', 0.0)
+                    sequence_number = metadata.get('sequence_number', 0)
+                    frame_number = metadata.get('frame_number', 0)
+                    
+                    print(f"📸 Saved (Color Splash): {os.path.basename(filepath)}")
+                    print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
+                    print(f"   📊 Status: {status} | 📈 Confidence: {confidence:.2f}")
+                    print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})")
+                    print(f"   💾 Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed\n")
+                else:
+                    self.failed_count += 1
+                    error_msg = f": {last_error}" if last_error else ""
+                    print(f"❌ Failed to save after {max_retries} retries{error_msg}: {os.path.basename(filepath)}")
+                    print(f"   💾 Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed\n")
+                
+                # Mark task as done
+                self.save_queue.task_done()
+                
+            except Exception as e:
+                print(f"⚠️ Save worker thread error: {e}")
+                self.failed_count += 1
+                try:
+                    self.save_queue.task_done()
+                except:
+                    pass
+    
+    def start_save_thread(self):
+        """Start the background save thread."""
+        if self.save_thread is None or not self.save_thread.is_alive():
+            self.save_thread_running = True
+            self.save_thread = threading.Thread(target=self.save_worker_thread, daemon=True)
+            self.save_thread.start()
+            print("✅ Background save thread started")
+    
+    def stop_save_thread(self):
+        """Stop the save thread and flush remaining items in queue."""
+        if self.save_thread_running:
+            print("🛑 Stopping save thread and flushing queue...")
+            self.save_thread_running = False
+            
+            # Wait for queue to be processed (with timeout)
+            timeout = 30  # 30 second timeout
+            start_time = time.time()
+            
+            while not self.save_queue.empty():
+                if time.time() - start_time > timeout:
+                    print(f"⚠️ Queue flush timeout after {timeout}s, {self.save_queue.qsize()} items remaining")
+                    break
+                time.sleep(0.1)
+            
+            # Wait for thread to finish
+            if self.save_thread is not None and self.save_thread.is_alive():
+                self.save_thread.join(timeout=5)
+                if self.save_thread.is_alive():
+                    print("⚠️ Save thread did not terminate cleanly")
+                else:
+                    print("✅ Save thread stopped")
+            
+            # Print final statistics
+            print(f"📊 Final Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed")
 
     def start_detection(self):
         """Main detection loop - runs continuously until user stops with Ctrl+C."""
@@ -719,6 +866,9 @@ class KillblockDetector:
         while not self.initialize_camera():
             print("⚠️ Camera initialization failed, retrying in 2 seconds...")
             time.sleep(2)
+        
+        # Start background save thread for non-blocking image saving
+        self.start_save_thread()
         
         detection_count = 0
         frame_count = 0
@@ -845,6 +995,7 @@ class KillblockDetector:
         
         # Clean up before exiting
         try:
+            self.stop_save_thread()
             self.cleanup_camera()
         except:
             pass
@@ -866,6 +1017,7 @@ def main():
     except KeyboardInterrupt:
         print("\n⏹️ Stopping detection")
     finally:
+        detector.stop_save_thread()
         detector.cleanup_camera()
 
 if __name__ == "__main__":
