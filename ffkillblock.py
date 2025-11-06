@@ -308,136 +308,6 @@ class KillblockDetector:
             print(f"⚠️ Green revive detection error: {e}")
             return False
     
-    def apply_color_splash(self, image: np.ndarray) -> np.ndarray:
-        """
-        Apply selective color effect - convert to grayscale except text, icons, and colored UI elements.
-        Optimized for speed using existing text detector.
-        
-        Args:
-            image: Input image in BGR format
-        
-        Returns:
-            Processed image with text/icons in color, rest in grayscale
-        """
-        try:
-            if image is None or image.size == 0:
-                return image
-            
-            height, width = image.shape[:2]
-            if height < 10 or width < 10:
-                return image
-            
-            # Create mask for regions to keep in color
-            color_mask = np.zeros((height, width), dtype=np.uint8)
-            
-            # METHOD 1: Detect text regions using existing text detector
-            if self.text_detector is not None:
-                try:
-                    # Use the existing PaddleOCR reader from text_detector
-                    text_results = self.text_detector.detect_text_regions(image)
-                    
-                    if text_results:
-                        for text_result in text_results:
-                            if isinstance(text_result, dict) and 'bbox' in text_result:
-                                # Extract bounding box
-                                x, y, w, h = text_result['bbox']
-                                x, y = int(x), int(y)
-                                w, h = int(w), int(h)
-                                
-                                # Ensure coordinates are within bounds
-                                x = max(0, min(x, width - 1))
-                                y = max(0, min(y, height - 1))
-                                w = min(w, width - x)
-                                h = min(h, height - y)
-                                
-                                if w > 0 and h > 0:
-                                    # Add padding and fill text region
-                                    padding = 3
-                                    x_start = max(0, x - padding)
-                                    y_start = max(0, y - padding)
-                                    x_end = min(width, x + w + padding)
-                                    y_end = min(height, y + h + padding)
-                                    color_mask[y_start:y_end, x_start:x_end] = 255
-                except Exception as e:
-                    # Fallback if text detection fails
-                    pass
-            
-            # METHOD 2: Detect colored icons and UI elements (high saturation areas)
-            # This catches colored icons, status indicators, and UI elements
-            try:
-                hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-                
-                # Detect high-saturation colored regions (icons, UI elements)
-                # High saturation = colored elements (not grayscale)
-                saturation_mask = hsv_image[:, :, 1] > 60  # Medium-high saturation
-                value_mask = hsv_image[:, :, 2] > 80  # Not too dark
-                colored_regions = saturation_mask & value_mask
-                
-                # Also detect specific colored UI elements (red, green, blue, yellow)
-                # Red: status indicators, damage numbers
-                lower_red1 = np.array([0, 60, 80])
-                upper_red1 = np.array([12, 255, 255])
-                lower_red2 = np.array([168, 60, 80])
-                upper_red2 = np.array([180, 255, 255])
-                mask_red = cv2.bitwise_or(
-                    cv2.inRange(hsv_image, lower_red1, upper_red1),
-                    cv2.inRange(hsv_image, lower_red2, upper_red2)
-                )
-                
-                # Green: revive indicators, health
-                lower_green = np.array([50, 60, 80])
-                upper_green = np.array([80, 255, 255])
-                mask_green = cv2.inRange(hsv_image, lower_green, upper_green)
-                
-                # Blue: UI elements
-                lower_blue = np.array([100, 60, 80])
-                upper_blue = np.array([130, 255, 255])
-                mask_blue = cv2.inRange(hsv_image, lower_blue, upper_blue)
-                
-                # Yellow/Orange: warnings, highlights
-                lower_yellow = np.array([20, 60, 80])
-                upper_yellow = np.array([35, 255, 255])
-                mask_yellow = cv2.inRange(hsv_image, lower_yellow, upper_yellow)
-                
-                # Combine all colored element masks
-                colored_icons_mask = cv2.bitwise_or(
-                    cv2.bitwise_or(mask_red, mask_green),
-                    cv2.bitwise_or(mask_blue, mask_yellow)
-                )
-                
-                # Also include high-saturation regions
-                colored_icons_mask = cv2.bitwise_or(
-                    colored_icons_mask,
-                    (colored_regions.astype(np.uint8) * 255)
-                )
-                
-                # Combine text mask with colored icons mask
-                color_mask = cv2.bitwise_or(color_mask, colored_icons_mask)
-                
-            except Exception as e:
-                # If color detection fails, continue with text mask only
-                pass
-            
-            # Apply morphological operations to smooth the mask
-            if cv2.countNonZero(color_mask) > 0:
-                kernel = np.ones((3, 3), np.uint8)
-                color_mask = cv2.dilate(color_mask, kernel, iterations=1)
-                color_mask = cv2.erode(color_mask, kernel, iterations=1)
-            
-            # Convert image to grayscale
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            
-            # Apply mask: keep original color where mask is 255, use grayscale elsewhere
-            result = np.where(color_mask[:, :, np.newaxis] == 255, image, gray_bgr)
-            
-            return result.astype(np.uint8)
-            
-        except Exception as e:
-            print(f"⚠️ Color splash error: {e}")
-            # Return original image if processing fails
-            return image
-
     def extract_names(self, cropped_image):
         """Extract killer and victim names using OCR."""
         if self.text_detector is None:
@@ -619,8 +489,7 @@ class KillblockDetector:
                 status = self.analyze_victim_color(cropped_image)
                 print(f"✅ STATUS: {status} (HSV color-based: {'WHITE' if status=='KNOCKED' else 'RED' if status=='FINISHED' else 'UNKNOWN'})")
             
-            # Apply color splash effect (selective color - grayscale except text/icons)
-            cropped_image_colorsplash = self.apply_color_splash(cropped_image)
+            # Use original cropped image directly (no color splash processing for speed)
             
             # Prepare for non-blocking save via background thread
             # Format: ORDER_KILLER STATUS VICTIM.png
@@ -653,7 +522,7 @@ class KillblockDetector:
             try:
                 # Put item in queue (non-blocking with timeout to prevent blocking)
                 # If queue is full, wait briefly then try again
-                self.save_queue.put((cropped_image_colorsplash.copy(), filepath, metadata), timeout=0.1)
+                self.save_queue.put((cropped_image.copy(), filepath, metadata), timeout=0.1)
                 print(f"📤 Enqueued for save: {filename}")
                 print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
                 print(f"   📊 Status: {status} | 📈 Confidence: {detection['confidence']:.2f}")
@@ -664,7 +533,7 @@ class KillblockDetector:
                 # Queue is full - this should not happen often, but if it does, retry once
                 print(f"⚠️ Save queue full, retrying...")
                 try:
-                    self.save_queue.put((cropped_image_colorsplash.copy(), filepath, metadata), timeout=1.0)
+                    self.save_queue.put((cropped_image.copy(), filepath, metadata), timeout=1.0)
                     print(f"📤 Enqueued for save (retry): {filename}\n")
                     return True
                 except queue.Full:
@@ -797,7 +666,7 @@ class KillblockDetector:
                     sequence_number = metadata.get('sequence_number', 0)
                     frame_number = metadata.get('frame_number', 0)
                     
-                    print(f"📸 Saved (Color Splash): {os.path.basename(filepath)}")
+                    print(f"📸 Saved: {os.path.basename(filepath)}")
                     print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
                     print(f"   📊 Status: {status} | 📈 Confidence: {confidence:.2f}")
                     print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})")
