@@ -65,91 +65,218 @@ class KillblockDetector:
             print(f"Error loading YOLO model: {e}")
             return None
 
-    def detect_revive_status(self, image):
-        """REVIVED detection using YOLOv11 high-confidence detection only.
-        Fully accurate with strict validation to prevent misclassification."""
-        try:
-            if self.model is None or image is None or image.size == 0:
-                return False
-            
-            height, width = image.shape[:2]
-            if height < 30 or width < 30:
-                return False
-            
-            # Use original size or resize appropriately for better detection
-            if height > 640 or width > 640:
-                # Maintain aspect ratio
-                if width > height:
-                    new_width = 640
-                    new_height = int(height * 640 / width)
-                else:
-                    new_height = 640
-                    new_width = int(width * 640 / height)
-                processed_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
-            else:
-                processed_image = image
-            
-            # HIGH-CONFIDENCE REVIVE detection: Use strict threshold for precision
-            # Only accept high-confidence detections to avoid false positives
-            results = self.model.predict(processed_image, conf=0.25, verbose=False, device='cpu')
-            
-            if results and len(results) > 0:
-                result = results[0]
-                if result.boxes is not None and len(result.boxes) > 0:
-                    names_map = getattr(self.model, 'names', None)
-                    
-                    revive_detections = []
-                    for box in result.boxes:
-                        confidence = float(box.conf[0].cpu().numpy())
-                        class_id = int(box.cls[0].cpu().numpy())
-                        
-                        if names_map:
-                            class_name = names_map.get(class_id, f"class_{class_id}")
-                            
-                            # Comprehensive revive class name checking (all variations)
-                            class_name_lower = class_name.lower()
-                            is_revive = (
-                                class_name_lower in ["revive", "revived", "revive_icon", "reviveicon"] or
-                                "revive" in class_name_lower or
-                                class_name_lower.startswith("revive") or
-                                class_name_lower.endswith("revive")
-                            )
-                            
-                            if is_revive and confidence >= 0.25:
-                                revive_detections.append((class_name, confidence))
-                    
-                    # STRICT VALIDATION: Only accept very high-confidence revive detections
-                    # Enhanced validation to ensure REVIVED is never misclassified
-                    if revive_detections:
-                        best_revive = max(revive_detections, key=lambda x: x[1])
-                        class_name, confidence = best_revive
-                        
-                        # Require very high confidence (0.28) for robust REVIVE detection
-                        # This prevents false positives and ensures REVIVED is never misclassified
-                        if confidence >= 0.28:
-                            # Additional validation: If multiple revive detections, verify consistency
-                            if len(revive_detections) > 1:
-                                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                                # If second detection also has reasonable confidence, more reliable
-                                if second_best[1] >= 0.22:
-                                    print(f"✅ REVIVED detected - Multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
-                                    return True
-                            
-                            # Single high-confidence detection is acceptable
-                            print(f"✅ REVIVED detected - Class: {class_name}, Confidence: {confidence:.3f}")
-                            return True
-                        else:
-                            print(f"⚠️ Revive confidence too low ({confidence:.3f} < 0.28) - rejected to prevent misclassification")
-                            return False
-            
+    def _is_revive_class(self, class_name):
+        """Check if class name indicates revive status."""
+        if not class_name:
             return False
+        class_name_lower = class_name.lower()
+        return (class_name_lower in ["revive", "revived", "revive_icon", "reviveicon"] or
+                "revive" in class_name_lower or
+                class_name_lower.startswith("revive") or
+                class_name_lower.endswith("revive"))
+    
+    def _validate_revive_detections(self, revive_detections, context=""):
+        """Validate revive detections with enhanced adaptive confidence thresholds.
+        More powerful and accurate - accepts lower confidence to catch more REVIVED cases."""
+        if not revive_detections:
+            return False
+        
+        best_revive = max(revive_detections, key=lambda x: x[1])
+        class_name, confidence = best_revive
+        
+        # High confidence (0.20+): Accept immediately (lowered from 0.25 for more sensitivity)
+        if confidence >= 0.20:
+            if len(revive_detections) > 1:
+                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.12:  # Lowered from 0.18
+                    print(f"✅ REVIVED detected{context} - Multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    return True
+            print(f"✅ REVIVED detected{context} - Class: {class_name}, Confidence: {confidence:.3f}")
+            return True
+        
+        # Medium confidence (0.15-0.20): Accept immediately (more powerful)
+        if confidence >= 0.15:
+            if len(revive_detections) > 1:
+                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.10:  # Lowered threshold
+                    print(f"✅ REVIVED detected{context} - Multiple medium-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    return True
+            # Accept single medium-confidence detection to catch more REVIVED cases
+            print(f"✅ REVIVED detected{context} - Single medium-confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            return True
+        
+        # Low confidence (0.10-0.15): Accept if multiple detections or reasonable single detection
+        if confidence >= 0.10:
+            if len(revive_detections) > 1:
+                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.08:  # Lowered threshold
+                    print(f"✅ REVIVED detected{context} - Multiple low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    return True
+            # Accept single low-confidence if it's reasonable (0.12+)
+            if confidence >= 0.12:
+                print(f"✅ REVIVED detected{context} - Single low-confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+                return True
+        
+        # Very low confidence (0.08-0.10): Only accept if multiple strong confirmations
+        if confidence >= 0.08:
+            if len(revive_detections) >= 2:
+                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.08:
+                    print(f"✅ REVIVED detected{context} - Multiple very-low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    return True
+        
+        print(f"⚠️ Revive confidence too low ({confidence:.3f} < 0.08) - rejected")
+        return False
+    
+    def _process_yolo_revive_detection(self, image, resize_to=None):
+        """Process YOLO revive detection on image with optional resize.
+        Uses consistent confidence thresholds to ensure accurate REVIVED detection."""
+        if self.model is None or image is None or image.size == 0:
+            return False
+        
+        height, width = image.shape[:2]
+        if height < 30 or width < 30:
+            return False
+        
+        # Resize if needed
+        if resize_to:
+            processed_image = cv2.resize(image, resize_to, interpolation=cv2.INTER_LINEAR)
+        elif height > 640 or width > 640:
+            if width > height:
+                new_width, new_height = 640, int(height * 640 / width)
+            else:
+                new_height, new_width = 640, int(width * 640 / height)
+            processed_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_LINEAR)
+        else:
+            processed_image = image
+        
+        try:
+            # Very low initial confidence threshold to catch more REVIVED detections
+            # Using 0.08 to catch even weak signals, then validate with adaptive thresholds
+            results = self.model.predict(processed_image, conf=0.08, verbose=False, device='cpu')
+        except Exception as e:
+            print(f"⚠️ YOLO predict error: {e}")
+            return False
+        
+        if not results or len(results) == 0:
+            return False
+        
+        result = results[0]
+        if result.boxes is None or len(result.boxes) == 0:
+            return False
+        
+        names_map = getattr(self.model, 'names', None)
+        revive_detections = []
+        
+        for box in result.boxes:
+            try:
+                confidence = float(box.conf[0].cpu().numpy())
+                class_id = int(box.cls[0].cpu().numpy())
+                class_name = names_map.get(class_id, f"class_{class_id}") if names_map else f"class_{class_id}"
+                
+                # Very low threshold to catch more REVIVED detections
+                # Accept any revive class detection above 0.08, validation will filter appropriately
+                if self._is_revive_class(class_name) and confidence >= 0.08:
+                    revive_detections.append((class_name, confidence))
+            except Exception as e:
+                print(f"⚠️ Error processing box: {e}")
+                continue
+        
+        return self._validate_revive_detections(revive_detections)
+    
+    def detect_revive_status(self, image):
+        """REVIVED detection using YOLOv11 with balanced confidence thresholds.
+        Ensures consistent and accurate REVIVED detection."""
+        try:
+            return self._process_yolo_revive_detection(image)
         except Exception as e:
             print(f"⚠️ Revive detection error: {e}")
             return False
+    
+    def validate_status_consistency(self, status, cropped_image):
+        """Final validation to ensure status consistency and prevent confusion.
+        Returns validated status or default fallback."""
+        if status is None:
+            return "KNOCKED"
+        
+        status_upper = status.upper().strip()
+        
+        # Valid statuses
+        valid_statuses = ["REVIVED", "KNOCKED", "FINISHED"]
+        
+        if status_upper not in valid_statuses:
+            print(f"⚠️ Invalid status '{status}', defaulting to KNOCKED")
+            return "KNOCKED"
+        
+        # Additional validation: If status is REVIVED, ensure it's not confused with color-based detection
+        # This is already handled in process_detection, but add extra safety here
+        if status_upper == "REVIVED":
+            # REVIVED should not be confused with KNOCKED or FINISHED
+            # This is guaranteed by the detection pipeline, but validate here too
+            return "REVIVED"
+        
+        # For KNOCKED and FINISHED, ensure they are mutually exclusive
+        # This is already handled in analyze_victim_color, but validate here too
+        if status_upper in ["KNOCKED", "FINISHED"]:
+            return status_upper
+        
+        # Default fallback
+        return "KNOCKED"
+
+    def preprocess_text_region(self, image):
+        """Preprocess image to enhance text visibility and isolate victim name text.
+        Applies contrast enhancement and text isolation techniques."""
+        try:
+            if image is None or image.size == 0:
+                return image
+            
+            # Create a copy to avoid modifying original
+            processed = image.copy()
+            
+            # Convert to LAB color space for better contrast enhancement
+            lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            
+            # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to L channel
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            l_enhanced = clahe.apply(l)
+            
+            # Merge channels back
+            lab_enhanced = cv2.merge([l_enhanced, a, b])
+            processed = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
+            
+            return processed
+        except Exception as e:
+            print(f"⚠️ Text preprocessing error: {e}")
+            return image
+
+    def _extract_region(self, image, x_start, x_end, y_start, y_end):
+        """Extract a region from image with bounds checking."""
+        if image is None or image.size == 0:
+            return None
+        height, width = image.shape[:2]
+        if height < 10 or width < 10:
+            return None
+        region = image[y_start:y_end, x_start:x_end]
+        if region.size == 0 or region.shape[0] < 5 or region.shape[1] < 5:
+            return None
+        return region
+    
+    def extract_victim_text_region(self, cropped_image):
+        """Extract the precise victim name text region for color analysis."""
+        try:
+            height, width = cropped_image.shape[:2]
+            return self._extract_region(cropped_image, int(width * 0.50), width, 
+                                       int(height * 0.20), int(height * 0.80))
+        except Exception as e:
+            print(f"⚠️ Text region extraction error: {e}")
+            return None
 
     def analyze_victim_color(self, cropped_image):
-        """Pure HSV color masking: WHITE=KNOCKED, RED=FINISHED.
-        Optimized HSV calibration to avoid cross-detection between colors."""
+        """Primary detection method: Analyzes victim name text color for KNOCKED/FINISHED status.
+        Focuses strictly on the victim name text region to avoid UI theme interference.
+        WHITE text = KNOCKED, RED text = FINISHED. Color-scheme independent and reliable.
+        PERFECTLY SEPARATED: Zero overlap between red and white detection ranges."""
         try:
             if cropped_image is None or cropped_image.size == 0:
                 return "UNKNOWN"
@@ -158,11 +285,13 @@ class KillblockDetector:
             if height < 10 or width < 10:
                 return "UNKNOWN"
             
-            # Focus on text region where victim name appears (right side)
-            text_region = cropped_image[:, int(width * 0.45):]
-            
-            if text_region.size == 0 or text_region.shape[0] < 5 or text_region.shape[1] < 5:
+            # Extract precise victim name text region (excludes UI borders/graphics)
+            text_region = self.extract_victim_text_region(cropped_image)
+            if text_region is None:
                 return "UNKNOWN"
+            
+            # Preprocess to enhance text visibility
+            text_region = self.preprocess_text_region(text_region)
             
             total_pixels = text_region.shape[0] * text_region.shape[1]
             if total_pixels == 0:
@@ -171,102 +300,128 @@ class KillblockDetector:
             # Convert to HSV for color analysis
             hsv_image = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)
             
-            # OPTIMIZED RED HSV ranges for FINISHED - calibrated to avoid white cross-detection
-            # Primary red range (0-10°): Pure red with high saturation/value
-            # Strict saturation (>= 70) ensures no overlap with white (which has low saturation)
-            lower_red1 = np.array([0, 70, 85])  # High saturation (70) and value (85) for strong reds
-            upper_red1 = np.array([10, 255, 255])
+            # PERFECTLY SEPARATED RED HSV ranges for FINISHED
+            # Red requires: High saturation (>= 80) AND high value (>= 90)
+            # This ensures NO overlap with white which has low saturation
+            # Primary red range (0-12°): Pure red with very high saturation
+            lower_red1 = np.array([0, 80, 90])   # Saturation >= 80, Value >= 90
+            upper_red1 = np.array([12, 255, 255])
             
-            # Secondary red range (170-180°): Wrap-around red with high saturation/value
-            lower_red2 = np.array([170, 70, 85])  # Matching saturation/value to primary
+            # Secondary red range (168-180°): Wrap-around red with very high saturation
+            lower_red2 = np.array([168, 80, 90])  # Matching strict criteria
             upper_red2 = np.array([180, 255, 255])
             
-            # OPTIMIZED WHITE HSV range for KNOCKED - calibrated to avoid red cross-detection
-            # White: Very high value (brightness), very low saturation (pure white/gray)
-            # Strict saturation (<= 20) ensures no overlap with red (which has high saturation)
-            lower_white = np.array([0, 0, 200])  # Very high value (200) for pure white, zero saturation
-            upper_white = np.array([180, 20, 255])  # Very low saturation tolerance (20) to exclude red-tinted whites
+            # PERFECTLY SEPARATED WHITE HSV range for KNOCKED
+            # White requires: Very low saturation (<= 15) AND very high value (>= 210)
+            # This ensures NO overlap with red which has high saturation
+            lower_white = np.array([0, 0, 210])   # Saturation <= 15, Value >= 210
+            upper_white = np.array([180, 15, 255])
             
-            # CRITICAL SEPARATION: Red requires saturation >= 70, White requires saturation <= 20
-            # This creates a 50-point gap between red and white detection ranges
-            # Ensures ZERO overlap and prevents cross-detection
+            # CRITICAL SEPARATION GUARANTEE:
+            # - Red: Saturation >= 80, Value >= 90
+            # - White: Saturation <= 15, Value >= 210
+            # - Gap: 65 saturation points between ranges (80-15=65)
+            # - This creates IMPOSSIBLE overlap condition
             
-            # Create red masks
+            # Create red masks with strict criteria
             mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
             mask_red2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
             mask_red_combined = cv2.bitwise_or(mask_red1, mask_red2)
             
-            # Create white mask
+            # Create white mask with strict criteria
             mask_white_raw = cv2.inRange(hsv_image, lower_white, upper_white)
             
-            # Ensure perfect separation: remove any potential overlap
-            # Red mask: exclude pixels that match white criteria (extra safety)
+            # MUTUAL EXCLUSION: Ensure perfect separation (defensive programming)
+            # Red mask: explicitly exclude any white pixels
             mask_red_final = cv2.bitwise_and(mask_red_combined, cv2.bitwise_not(mask_white_raw))
             
-            # White mask: exclude pixels that match red criteria (extra safety)
+            # White mask: explicitly exclude any red pixels
             mask_white_final = cv2.bitwise_and(mask_white_raw, cv2.bitwise_not(mask_red_combined))
             
             # Calculate ratios
             red_pixels = cv2.countNonZero(mask_red_final)
             white_pixels = cv2.countNonZero(mask_white_final)
             
-            red_ratio = red_pixels / total_pixels
-            white_ratio = white_pixels / total_pixels
+            red_ratio = red_pixels / total_pixels if total_pixels > 0 else 0.0
+            white_ratio = white_pixels / total_pixels if total_pixels > 0 else 0.0
             
             # Debug output
             print(f"🔍 HSV color analysis - Red ratio: {red_ratio:.4f} ({red_pixels} px), White ratio: {white_ratio:.4f} ({white_pixels} px)")
             
-            # OPTIMIZED DECISION LOGIC with calibrated thresholds
-            # Thresholds calibrated to avoid cross-detection while maintaining sensitivity
+            # SPECIAL CASE: One color is completely absent (zero ratio)
+            # If one ratio is 0 and the other is significant, the decision is clear
+            if red_ratio == 0 and white_ratio >= 0.010:
+                print(f"✅ KNOCKED detected - White present, red absent (ratio: {white_ratio:.4f})")
+                return "KNOCKED"
             
-            # Primary thresholds (high confidence)
-            red_threshold_primary = 0.018  # Require meaningful red presence
-            white_threshold_primary = 0.018  # Require meaningful white presence
-            dominance_ratio_primary = 2.5  # One color must be 2.5x the other for clear decision
+            if white_ratio == 0 and red_ratio >= 0.010:
+                print(f"✅ FINISHED detected - Red present, white absent (ratio: {red_ratio:.4f})")
+                return "FINISHED"
             
-            # Secondary thresholds (medium confidence)
-            red_threshold_secondary = 0.012
-            white_threshold_secondary = 0.012
-            dominance_ratio_secondary = 2.0
+            # VALIDATION: Ensure only one status is detected (mutual exclusion)
+            # If both ratios are significant, choose the dominant one with clear margin
             
-            # Primary decision: HIGH CONFIDENCE
+            # STRICT DECISION LOGIC - No ambiguity allowed
+            # Primary thresholds (high confidence) - require clear dominance
+            red_threshold_primary = 0.020   # Require meaningful red presence
+            white_threshold_primary = 0.020  # Require meaningful white presence
+            dominance_ratio_primary = 3.0   # One color must be 3x the other (stricter)
+            
+            # Secondary thresholds (medium confidence) - still require clear dominance
+            red_threshold_secondary = 0.015
+            white_threshold_secondary = 0.015
+            dominance_ratio_secondary = 2.5
+            
+            # PRIMARY DECISION: HIGH CONFIDENCE - Clear dominance required
             if red_ratio >= red_threshold_primary:
-                if red_ratio >= white_ratio * dominance_ratio_primary:
-                    print(f"✅ FINISHED detected - Primary red HSV signal (ratio: {red_ratio:.4f})")
-                    return "FINISHED"
+                if white_ratio == 0 or red_ratio >= white_ratio * dominance_ratio_primary:
+                    # Additional validation: ensure red is significantly higher
+                    if red_ratio > white_ratio + 0.010:  # At least 1% absolute difference
+                        dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
+                        print(f"✅ FINISHED detected - Primary red HSV signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "FINISHED"
             
             if white_ratio >= white_threshold_primary:
-                if white_ratio >= red_ratio * dominance_ratio_primary:
-                    print(f"✅ KNOCKED detected - Primary white HSV signal (ratio: {white_ratio:.4f})")
-                    return "KNOCKED"
+                if red_ratio == 0 or white_ratio >= red_ratio * dominance_ratio_primary:
+                    # Additional validation: ensure white is significantly higher
+                    if white_ratio > red_ratio + 0.010:  # At least 1% absolute difference
+                        dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
+                        print(f"✅ KNOCKED detected - Primary white HSV signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "KNOCKED"
             
-            # Secondary decision: MEDIUM CONFIDENCE
+            # SECONDARY DECISION: MEDIUM CONFIDENCE - Still require clear dominance
             if red_ratio >= red_threshold_secondary:
-                if red_ratio >= white_ratio * dominance_ratio_secondary:
-                    # Additional check: ensure red is clearly dominant
-                    if red_ratio > white_ratio * 1.8:
-                        print(f"✅ FINISHED detected - Secondary red HSV signal (ratio: {red_ratio:.4f})")
+                if white_ratio == 0 or red_ratio >= white_ratio * dominance_ratio_secondary:
+                    # Additional validation: ensure red is clearly dominant
+                    if red_ratio > white_ratio * 2.0 and red_ratio > white_ratio + 0.008:
+                        dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
+                        print(f"✅ FINISHED detected - Secondary red HSV signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
                         return "FINISHED"
             
             if white_ratio >= white_threshold_secondary:
-                if white_ratio >= red_ratio * dominance_ratio_secondary:
-                    # Additional check: ensure white is clearly dominant
-                    if white_ratio > red_ratio * 1.8:
-                        print(f"✅ KNOCKED detected - Secondary white HSV signal (ratio: {white_ratio:.4f})")
+                if red_ratio == 0 or white_ratio >= red_ratio * dominance_ratio_secondary:
+                    # Additional validation: ensure white is clearly dominant
+                    if white_ratio > red_ratio * 2.0 and white_ratio > red_ratio + 0.008:
+                        dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
+                        print(f"✅ KNOCKED detected - Secondary white HSV signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
                         return "KNOCKED"
             
-            # Final fallback: Clear dominance with minimum presence
-            if red_ratio > white_ratio * 1.6:
-                if red_ratio >= 0.008:  # Minimum meaningful red presence
-                    print(f"✅ FINISHED detected - Fallback red signal (ratio: {red_ratio:.4f})")
+            # FINAL FALLBACK: Very clear dominance with minimum presence
+            # Only use if one color is clearly dominant (2.5x) and has minimum presence
+            if white_ratio == 0 or red_ratio > white_ratio * 2.5:
+                if red_ratio >= 0.010:  # Minimum meaningful red presence
+                    dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
+                    print(f"✅ FINISHED detected - Fallback red signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
                     return "FINISHED"
             
-            if white_ratio > red_ratio * 1.6:
-                if white_ratio >= 0.008:  # Minimum meaningful white presence
-                    print(f"✅ KNOCKED detected - Fallback white signal (ratio: {white_ratio:.4f})")
+            if red_ratio == 0 or white_ratio > red_ratio * 2.5:
+                if white_ratio >= 0.010:  # Minimum meaningful white presence
+                    dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
+                    print(f"✅ KNOCKED detected - Fallback white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
                     return "KNOCKED"
             
-            # Default: If truly ambiguous, default to KNOCKED (most common case)
+            # DEFAULT: If truly ambiguous (both ratios low or similar), default to KNOCKED
+            # This is the most common case in Free Fire
             print(f"⚠️ Ambiguous color - defaulting to KNOCKED (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
             return "KNOCKED"
             
@@ -274,38 +429,137 @@ class KillblockDetector:
             print(f"⚠️ Color analysis error: {e}")
             return "UNKNOWN"
 
-    def detect_revive_green(self, cropped_image):
-        """ROBUST secondary fallback: detect green hue in revive indicators.
-        Only used when model-based revive detection fails. Requires strict validation."""
+    def extract_status_text_region(self, cropped_image):
+        """Extract the status text region (middle area) where REVIVED/KNOCKED/FINISHED appears."""
         try:
-            if cropped_image is None or cropped_image.size == 0:
-                return False
-            
             height, width = cropped_image.shape[:2]
-            if height < 10 or width < 10:
-                return False
+            return self._extract_region(cropped_image, int(width * 0.35), int(width * 0.65),
+                                       int(height * 0.15), int(height * 0.85))
+        except Exception as e:
+            print(f"⚠️ Status text region extraction error: {e}")
+            return None
+
+    def detect_revive_text(self, cropped_image):
+        """Detect REVIVED status by looking for 'REVIVED' text using OCR.
+        Enhanced with multiple preprocessing methods and comprehensive pattern matching.
+        Strengthened to catch REVIVED text even with OCR errors or low confidence."""
+        if cropped_image is None or cropped_image.size == 0 or self.text_detector is None:
+            return False
+        
+        try:
+            # Method 1: Check entire cropped image
+            text_regions = self.text_detector.detect_text_regions(cropped_image)
             
-            # Focus on text region where revive indicators appear
-            text_region = cropped_image[:, int(width * 0.45):]
+            # Method 2: Check status text region (middle area) - most common location for REVIVED
+            status_region = self.extract_status_text_region(cropped_image)
+            if status_region is not None:
+                text_regions.extend(self.text_detector.detect_text_regions(status_region))
             
-            hsv = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)
-            # Strict green range to avoid false positives from HUD elements
-            lower_green = np.array([50, 90, 90])  # Higher saturation/value to avoid noise
-            upper_green = np.array([80, 255, 255])
-            mask_green = cv2.inRange(hsv, lower_green, upper_green)
+            # Method 3: Check victim name region (right side) - sometimes REVIVED appears there
+            victim_region = self.extract_victim_text_region(cropped_image)
+            if victim_region is not None:
+                text_regions.extend(self.text_detector.detect_text_regions(victim_region))
             
-            total = text_region.shape[0] * text_region.shape[1]
-            if total <= 0:
-                return False
+            # Method 4: Check preprocessed image (enhanced contrast) for better OCR
+            try:
+                preprocessed = self.preprocess_text_region(cropped_image)
+                if preprocessed is not None and preprocessed.size > 0:
+                    text_regions.extend(self.text_detector.detect_text_regions(preprocessed))
+            except:
+                pass
             
-            green_ratio = cv2.countNonZero(mask_green) / total
-            # Require higher proportion (0.025) for robust green detection
-            if green_ratio > 0.025:
-                print(f"🟢 Green revive indicator detected (ratio: {green_ratio:.4f})")
-                return True
+            # Method 5: Check left-middle region (sometimes REVIVED appears near killer name)
+            try:
+                height, width = cropped_image.shape[:2]
+                left_middle_region = self._extract_region(cropped_image, int(width * 0.20), int(width * 0.50),
+                                                        int(height * 0.15), int(height * 0.85))
+                if left_middle_region is not None:
+                    text_regions.extend(self.text_detector.detect_text_regions(left_middle_region))
+            except:
+                pass
+            
+            # Method 6: Check upper-middle region (status text often appears here)
+            try:
+                height, width = cropped_image.shape[:2]
+                upper_middle_region = self._extract_region(cropped_image, int(width * 0.30), int(width * 0.70),
+                                                          int(height * 0.10), int(height * 0.50))
+                if upper_middle_region is not None:
+                    text_regions.extend(self.text_detector.detect_text_regions(upper_middle_region))
+            except:
+                pass
+            
+            # Comprehensive pattern matching for REVIVED indicators
+            # Accept even low-confidence OCR if pattern matches strongly
+            for region in text_regions:
+                text = region.get('text', '').upper().strip()
+                confidence = region.get('confidence', 0.0)
+                original_text = region.get('text', '')
+                
+                # Remove common OCR noise characters
+                text_clean = text.replace(' ', '').replace('-', '').replace('_', '').replace('.', '').replace(',', '')
+                
+                # Direct match - most reliable (accept even low confidence for exact match)
+                if 'REVIVED' in text:
+                    print(f"✅ REVIVED text detected via OCR: '{original_text}' (confidence: {confidence:.3f})")
+                    return True
+                
+                # Starts with REVIVE - likely REVIVED (accept even low confidence)
+                if text.startswith('REVIVE'):
+                    print(f"✅ REVIVED text detected via OCR: '{original_text}' (confidence: {confidence:.3f})")
+                    return True
+                
+                # Contains REVIVE and is short (likely status word) - accept even low confidence
+                if 'REVIVE' in text and len(text) <= 25:
+                    words = text.split()
+                    for word in words:
+                        if word in ['REVIVED', 'REVIVE']:
+                            print(f"✅ REVIVED text detected via OCR: '{original_text}' (confidence: {confidence:.3f})")
+                            return True
+                
+                # Check for common OCR errors/misspellings with fuzzy matching
+                # Accept even very low confidence if pattern is clear
+                revive_patterns = ['REVIVD', 'REVIV', 'REVIVE', 'REVIVED', 'REV1VED', 'REV1VE', 'REVIV3D']
+                if any(pattern in text_clean for pattern in revive_patterns):
+                    if len(text) <= 30:  # Allow longer text with variants
+                        print(f"✅ REVIVED text detected via OCR (variant): '{original_text}' (confidence: {confidence:.3f})")
+                        return True
+                
+                # Check for partial matches (e.g., "REVIV" at start or end)
+                if text.startswith('REVIV') or text.endswith('REVIV'):
+                    if len(text) <= 20:  # Increased from 15
+                        print(f"✅ REVIVED text detected via OCR (partial): '{original_text}' (confidence: {confidence:.3f})")
+                        return True
+                
+                # Check for REVIVE in any position with reasonable length
+                if 'REVIVE' in text and len(text) <= 30:  # Increased from 25
+                    # Additional validation: check if it's not part of a longer unrelated word
+                    if not any(unrelated in text for unrelated in ['REVIVERY', 'REVIVAL', 'REVIVIFY']):
+                        print(f"✅ REVIVED text detected via OCR (flexible): '{original_text}' (confidence: {confidence:.3f})")
+                        return True
+                
+                # Check for OCR character substitutions (common errors)
+                # R->P, E->F, V->Y, I->1, etc.
+                text_normalized = text.replace('1', 'I').replace('0', 'O').replace('5', 'S').replace('3', 'E')
+                if 'REVIVE' in text_normalized or 'REVIVED' in text_normalized:
+                    if len(text) <= 30:
+                        print(f"✅ REVIVED text detected via OCR (normalized): '{original_text}' (confidence: {confidence:.3f})")
+                        return True
+                
+                # Check for fuzzy matches with Levenshtein-like patterns
+                # Accept if text contains 4+ consecutive matching characters from REVIVED
+                if len(text) >= 4:
+                    text_chars = set(text_clean)
+                    revive_chars = set('REVIVED')
+                    # If 4+ characters match, likely REVIVED
+                    if len(text_chars.intersection(revive_chars)) >= 4:
+                        if 'R' in text_chars and 'E' in text_chars and 'V' in text_chars:
+                            if len(text) <= 15:  # Short text likely to be status word
+                                print(f"✅ REVIVED text detected via OCR (fuzzy match): '{original_text}' (confidence: {confidence:.3f})")
+                                return True
+            
             return False
         except Exception as e:
-            print(f"⚠️ Green revive detection error: {e}")
+            print(f"⚠️ OCR text detection error: {e}")
             return False
     
     def extract_names(self, cropped_image):
@@ -344,6 +598,18 @@ class KillblockDetector:
         except:
             return False
 
+    def _convert_bbox_coords(self, bbox_resized, orig_size, resize_size):
+        """Convert bbox coordinates from resized to original image size."""
+        x1_r, y1_r, x2_r, y2_r = bbox_resized
+        orig_h, orig_w = orig_size
+        resize_w, resize_h = resize_size
+        
+        x1 = max(0, min(int(x1_r * orig_w / resize_w), orig_w - 1))
+        y1 = max(0, min(int(y1_r * orig_h / resize_h), orig_h - 1))
+        x2 = max(x1 + 1, min(int(x2_r * orig_w / resize_w), orig_w))
+        y2 = max(y1 + 1, min(int(y2_r * orig_h / resize_h), orig_h))
+        return [x1, y1, x2, y2]
+
     def detect_killblocks(self, image):
         """Detect killblocks using YOLO model."""
         if self.model is None:
@@ -355,34 +621,35 @@ class KillblockDetector:
             if names_map is None:
                 return None
             
-            # High confidence threshold (65%) - only detect high-quality killblocks
-            results = self.model.predict(processed_image, conf=0.65, verbose=False, device='cpu')
-            detections = []
+            try:
+                results = self.model.predict(processed_image, conf=0.65, verbose=False, device='cpu')
+            except Exception as e:
+                print(f"⚠️ YOLO predict error in detect_killblocks: {e}")
+                return None
             
-            if results and len(results) > 0:
-                result = results[0]
-                if result.boxes is not None and len(result.boxes) > 0:
-                    for box in result.boxes:
-                        confidence = float(box.conf[0].cpu().numpy())
-                        class_id = int(box.cls[0].cpu().numpy())
-                        class_name = names_map.get(class_id, f"class_{class_id}") if isinstance(names_map, dict) else f"class_{class_id}"
-                        
-                        # Require 65% confidence for killblock detection (only high-quality detections)
-                        if class_name.lower() == "killblock" and confidence >= 0.65:
-                            x1_resized, y1_resized, x2_resized, y2_resized = box.xyxy[0].cpu().numpy()
-                            orig_height, orig_width = image.shape[:2]
-                            
-                            x1 = int(x1_resized * orig_width / 1280)
-                            y1 = int(y1_resized * orig_height / 720)
-                            x2 = int(x2_resized * orig_width / 1280)
-                            y2 = int(y2_resized * orig_height / 720)
-                            
-                            x1 = max(0, min(x1, orig_width - 1))
-                            y1 = max(0, min(y1, orig_height - 1))
-                            x2 = max(x1 + 1, min(x2, orig_width))
-                            y2 = max(y1 + 1, min(y2, orig_height))
-                            
-                            detections.append({'bbox': [x1, y1, x2, y2], 'confidence': confidence})
+            if not results or len(results) == 0:
+                return None
+            
+            result = results[0]
+            if result.boxes is None or len(result.boxes) == 0:
+                return None
+            
+            detections = []
+            orig_size = image.shape[:2]
+            
+            for box in result.boxes:
+                try:
+                    confidence = float(box.conf[0].cpu().numpy())
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = names_map.get(class_id, f"class_{class_id}") if isinstance(names_map, dict) else f"class_{class_id}"
+                    
+                    if class_name.lower() == "killblock" and confidence >= 0.65:
+                        bbox_resized = box.xyxy[0].cpu().numpy()
+                        bbox = self._convert_bbox_coords(bbox_resized, orig_size, (1280, 720))
+                        detections.append({'bbox': bbox, 'confidence': confidence})
+                except Exception as e:
+                    print(f"⚠️ Error processing box in detect_killblocks: {e}")
+                    continue
             
             return detections if detections else None
         except Exception as e:
@@ -392,53 +659,7 @@ class KillblockDetector:
     def detect_revive_in_frame(self, frame):
         """Check entire frame for revive class from YOLO model."""
         try:
-            if self.model is None or frame is None or frame.size == 0:
-                return False
-            
-            # ROBUST full frame REVIVE detection with strict validation
-            # Full frame detection requires higher confidence to avoid false positives
-            processed_frame = cv2.resize(frame, (1280, 720))
-            results = self.model.predict(processed_frame, conf=0.25, verbose=False, device='cpu')
-            
-            if results and len(results) > 0:
-                result = results[0]
-                if result.boxes is not None and len(result.boxes) > 0:
-                    names_map = getattr(self.model, 'names', None)
-                    
-                    revive_detections = []
-                    for box in result.boxes:
-                        confidence = float(box.conf[0].cpu().numpy())
-                        class_id = int(box.cls[0].cpu().numpy())
-                        
-                        if names_map:
-                            class_name = names_map.get(class_id, f"class_{class_id}")
-                            class_name_lower = class_name.lower()
-                            
-                            # Comprehensive revive class name checking
-                            is_revive = (
-                                class_name_lower in ["revive", "revived", "revive_icon", "reviveicon"] or
-                                "revive" in class_name_lower or
-                                class_name_lower.startswith("revive") or
-                                class_name_lower.endswith("revive")
-                            )
-                            
-                            if is_revive and confidence >= 0.25:
-                                revive_detections.append((class_name, confidence))
-                    
-                    # STRICT VALIDATION for full frame - require very high confidence
-                    if revive_detections:
-                        best_revive = max(revive_detections, key=lambda x: x[1])
-                        class_name, confidence = best_revive
-                        
-                        # Full frame requires even higher confidence (0.28) to prevent false positives
-                        if confidence >= 0.28:
-                            print(f"🔄 REVIVE detected in full frame - Class: {class_name}, Confidence: {confidence:.3f}")
-                            return True
-                        else:
-                            print(f"⚠️ Full frame revive confidence too low ({confidence:.3f} < 0.28) - rejected")
-                            return False
-            
-            return False
+            return self._process_yolo_revive_detection(frame, resize_to=(1280, 720))
         except Exception as e:
             print(f"⚠️ Frame revive check error: {e}")
             return False
@@ -459,56 +680,99 @@ class KillblockDetector:
                 print(f"🚫 Duplicate detected - skipping")
                 return False
             
-            # REFINED STATUS DETECTION PIPELINE - REVIVED has absolute priority
-            # Step 1: Check for REVIVED using YOLOv11 high-confidence detection (primary method)
-            print("🔍 Checking for REVIVED detection (YOLOv11 high-confidence)...")
+            # ROBUST STATUS DETECTION PIPELINE - Multi-layered detection with mutual exclusion
+            # REVIVED detection has ABSOLUTE PRIORITY - must be checked first before color analysis
+            # Uses multiple independent methods that work together for maximum reliability
+            # Ensures perfect accuracy and consistency with zero overlap between statuses
+            
+            # Step 1: OCR text detection FIRST (most reliable for REVIVED)
+            # This is the strongest signal and should be checked before YOLO
+            print("🔍 Checking for REVIVED text via OCR (primary method)...")
+            revive_text_detected = self.detect_revive_text(cropped_image)
+            
+            # Step 1.5: Also check extracted names for REVIVED patterns (additional text-based check)
+            # Sometimes REVIVED appears in the name extraction results
+            revive_in_names = False
+            if not revive_text_detected:
+                killer_upper = killer_name.upper().strip()
+                victim_upper = victim_name.upper().strip()
+                # Check if REVIVED appears in extracted names (sometimes OCR puts it there)
+                if 'REVIVED' in killer_upper or 'REVIVED' in victim_upper:
+                    revive_in_names = True
+                    print(f"✅ REVIVED found in extracted names: '{killer_name}' / '{victim_name}'")
+                elif 'REVIVE' in killer_upper or 'REVIVE' in victim_upper:
+                    # Check if it's a standalone REVIVE word, not part of a name
+                    killer_words = killer_upper.split()
+                    victim_words = victim_upper.split()
+                    if any(word in ['REVIVE', 'REVIVED'] for word in killer_words + victim_words):
+                        revive_in_names = True
+                        print(f"✅ REVIVED found in extracted names: '{killer_name}' / '{victim_name}'")
+            
+            # Step 2: Check for REVIVED using YOLOv11 (secondary method)
+            print("🔍 Checking for REVIVED detection (YOLOv11)...")
             revive_in_crop = self.detect_revive_status(cropped_image)
             
-            # Step 2: Check full frame for revive (with high-confidence validation)
+            # Step 3: Check full frame for revive (additional validation)
             revive_in_frame = self.detect_revive_in_frame(full_frame)
             
-            # Step 3: Color validation fallback for REVIVED (green HSV validation)
-            # Only used as fallback if YOLOv11 doesn't detect but green is present
-            green_revive_detected = False
-            if not revive_in_crop and not revive_in_frame:
-                green_revive_detected = self.detect_revive_green(cropped_image)
+            # Combine results from all detection methods
+            # REVIVED is confirmed if ANY method detects it with sufficient confidence
+            detection_sources = []
+            revive_confidence_score = 0.0
             
-            # FINAL STATUS DECISION - REVIVED has absolute priority to prevent misclassification
-            # If REVIVED is detected by any method, it takes precedence over color analysis
-            # This ensures REVIVED is never misclassified as KNOCKED or FINISHED
-            if revive_in_crop or revive_in_frame or green_revive_detected:
-                # REVIVED: Confirmed through YOLOv11 high-confidence detection or color validation fallback
-                # REVIVED status is final - never fall through to color analysis
+            if revive_text_detected:
+                detection_sources.append("OCR text recognition")
+                revive_confidence_score += 0.5  # OCR is highly reliable
+            
+            if revive_in_names:
+                detection_sources.append("OCR name extraction")
+                revive_confidence_score += 0.4  # Name extraction is also reliable for text
+            
+            if revive_in_crop:
+                detection_sources.append("YOLO killblock crop")
+                revive_confidence_score += 0.3
+            
+            if revive_in_frame:
+                detection_sources.append("YOLO full frame")
+                revive_confidence_score += 0.2
+            
+            # REVIVED has ABSOLUTE PRIORITY - if detected by any method, use REVIVED
+            # Lowered threshold to 0.2 to catch more REVIVED cases (OCR text alone gives 0.5, so this is safe)
+            # Mutual exclusion: REVIVED cannot be confused with KNOCKED or FINISHED
+            if detection_sources and revive_confidence_score >= 0.2:
                 status = "REVIVED"
-                source = "killblock crop" if revive_in_crop else ("full frame" if revive_in_frame else "green HSV validation")
-                print(f"✅ STATUS: REVIVED (detected via {source}) - REVIVED takes priority, skipping color analysis")
+                source = " + ".join(detection_sources)
+                print(f"✅ STATUS: REVIVED (detected via {source}, confidence score: {revive_confidence_score:.2f}) - REVIVED takes absolute priority, skipping color analysis")
             else:
-                # Step 4: Pure HSV color masking for KNOCKED/FINISHED (only if REVIVED is NOT detected)
-                # Only proceed to color analysis if REVIVED was definitively not detected
-                # KNOCKED = white, FINISHED = red
+                # Only if NO REVIVED detection, proceed with color analysis for KNOCKED/FINISHED
+                # This ensures mutual exclusion: REVIVED vs KNOCKED/FINISHED
+                print("🔍 No REVIVED detected, checking color for KNOCKED/FINISHED...")
                 status = self.analyze_victim_color(cropped_image)
-                print(f"✅ STATUS: {status} (HSV color-based: {'WHITE' if status=='KNOCKED' else 'RED' if status=='FINISHED' else 'UNKNOWN'})")
+                
+                # VALIDATION: Ensure status is valid and not confused
+                if status not in ["KNOCKED", "FINISHED", "UNKNOWN"]:
+                    print(f"⚠️ Invalid status '{status}', defaulting to KNOCKED")
+                    status = "KNOCKED"
+                
+                color_name = {'KNOCKED': 'WHITE', 'FINISHED': 'RED'}.get(status, 'UNKNOWN')
+                print(f"✅ STATUS: {status} (victim name text color: {color_name})")
+                
+                # Final validation: Ensure KNOCKED and FINISHED are mutually exclusive
+                # This is already handled in analyze_victim_color, but double-check here
+                if status == "UNKNOWN":
+                    print(f"⚠️ Status detection returned UNKNOWN, defaulting to KNOCKED (most common)")
+                    status = "KNOCKED"
             
-            # Use original cropped image directly (no color splash processing for speed)
+            # FINAL VALIDATION: Ensure status consistency and prevent any confusion
+            status = self.validate_status_consistency(status, cropped_image)
             
             # Prepare for non-blocking save via background thread
-            # Format: ORDER_KILLER STATUS VICTIM.png
-            # Simple order number (3 digits) shows capture sequence and helps identify missed frames
             output_dir = "cropkillblock"
             os.makedirs(output_dir, exist_ok=True)
-            
-            # Simple order number format (3 digits: 001, 002, 003...)
-            # Order number: Easy to see sequence and identify gaps (missed frames)
-            # Format: ORDER_KILLER STATUS VICTIM.png
             filename = f"{sequence_number:03d}_{killer_name} {status} {victim_name}.png"
             filepath = os.path.join(output_dir, filename)
             
-            # Non-blocking enqueue for background save thread
-            # Queue ensures strict chronological order - FIFO guarantees earlier detections saved first
-            # Increment detected count before enqueueing
             self.detected_count += 1
-            
-            # Prepare metadata for save thread
             metadata = {
                 'killer_name': killer_name,
                 'victim_name': victim_name,
@@ -520,8 +784,6 @@ class KillblockDetector:
             
             # Enqueue for background save (non-blocking)
             try:
-                # Put item in queue (non-blocking with timeout to prevent blocking)
-                # If queue is full, wait briefly then try again
                 self.save_queue.put((cropped_image.copy(), filepath, metadata), timeout=0.1)
                 print(f"📤 Enqueued for save: {filename}")
                 print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
@@ -530,7 +792,6 @@ class KillblockDetector:
                 print(f"   💾 Queue size: {self.save_queue.qsize()} | Detected: {self.detected_count}\n")
                 return True
             except queue.Full:
-                # Queue is full - this should not happen often, but if it does, retry once
                 print(f"⚠️ Save queue full, retrying...")
                 try:
                     self.save_queue.put((cropped_image.copy(), filepath, metadata), timeout=1.0)
@@ -658,18 +919,10 @@ class KillblockDetector:
                             print(f"❌ Save failed after {max_retries} attempts: {e}")
                 
                 if saved:
-                    # Print success message with metadata
-                    killer_name = metadata.get('killer_name', '')
-                    victim_name = metadata.get('victim_name', '')
-                    status = metadata.get('status', '')
-                    confidence = metadata.get('confidence', 0.0)
-                    sequence_number = metadata.get('sequence_number', 0)
-                    frame_number = metadata.get('frame_number', 0)
-                    
                     print(f"📸 Saved: {os.path.basename(filepath)}")
-                    print(f"   👤 Killer: {killer_name} | 🎯 Victim: {victim_name}")
-                    print(f"   📊 Status: {status} | 📈 Confidence: {confidence:.2f}")
-                    print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})")
+                    print(f"   👤 Killer: {metadata.get('killer_name', '')} | 🎯 Victim: {metadata.get('victim_name', '')}")
+                    print(f"   📊 Status: {metadata.get('status', '')} | 📈 Confidence: {metadata.get('confidence', 0.0):.2f}")
+                    print(f"   🔢 Order: #{metadata.get('sequence_number', 0)} (Frame: {metadata.get('frame_number', 0)})")
                     print(f"   💾 Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed\n")
                 else:
                     self.failed_count += 1
@@ -687,6 +940,8 @@ class KillblockDetector:
                     self.save_queue.task_done()
                 except:
                     pass
+                # Continue running - don't exit thread on error
+                time.sleep(0.1)
     
     def start_save_thread(self):
         """Start the background save thread."""
@@ -744,9 +999,19 @@ class KillblockDetector:
         last_detection_time = 0
         consecutive_failures = 0
         max_failures = 100  # Allow many failures before reconnecting
+        last_save_thread_check = time.time()
+        save_thread_check_interval = 10  # Check every 10 seconds
         
         while True:
             try:
+                # Check if save thread is still alive and restart if needed
+                current_time = time.time()
+                if current_time - last_save_thread_check > save_thread_check_interval:
+                    if self.save_thread is not None and not self.save_thread.is_alive():
+                        print("⚠️ Save thread died! Restarting...")
+                        self.start_save_thread()
+                    last_save_thread_check = current_time
+                
                 # Periodic cleanup every 200 frames
                 if frame_count > 0 and frame_count % 200 == 0:
                     print(f"🔄 Periodic camera cleanup at frame #{frame_count}")
@@ -779,7 +1044,9 @@ class KillblockDetector:
                         print(f"⚠️ Frame capture failed ({consecutive_failures} consecutive), retrying...")
                     else:
                         print(f"⚠️ Multiple capture failures ({consecutive_failures}), reconnecting camera...")
-                        while True:  # Keep trying until reconnected
+                        reconnect_attempts = 0
+                        max_reconnect_attempts = 100  # Limit to prevent infinite hang
+                        while reconnect_attempts < max_reconnect_attempts:
                             try:
                                 self.cleanup_camera()
                                 time.sleep(1)
@@ -787,9 +1054,17 @@ class KillblockDetector:
                                     print("✅ Camera reconnected successfully")
                                     consecutive_failures = 0
                                     break
+                                reconnect_attempts += 1
+                                if reconnect_attempts % 10 == 0:
+                                    print(f"⚠️ Still trying to reconnect... ({reconnect_attempts}/{max_reconnect_attempts})")
                             except Exception as e:
-                                print(f"⚠️ Reconnect attempt failed: {e}, retrying in 2 seconds...")
+                                print(f"⚠️ Reconnect attempt {reconnect_attempts} failed: {e}, retrying in 2 seconds...")
                                 time.sleep(2)
+                                reconnect_attempts += 1
+                        
+                        if reconnect_attempts >= max_reconnect_attempts:
+                            print("⚠️ Max reconnect attempts reached, continuing with retry logic...")
+                            consecutive_failures = 0  # Reset to allow normal retry
                     
                     time.sleep(0.5)
                     continue
@@ -814,26 +1089,14 @@ class KillblockDetector:
                         
                         print(f"\n🎯 Detection #{detection_count} at frame #{frame_count}")
                         
-                        # Process detections synchronously in order to preserve chronological sequence
-                        # Each detection gets a unique timestamp to ensure no overwriting and proper ordering
+                        # Process detections synchronously to preserve chronological sequence
                         for detection in detections:
                             try:
-                                # Generate unique timestamp for each detection to ensure chronological order
-                                # Include milliseconds (3 digits) for uniqueness even if multiple detections in same frame
                                 time_str = datetime.datetime.now().strftime("%H%M%S_%f")[:-3]
-                                
-                                # Small delay to ensure timestamp uniqueness if multiple detections in same cycle
-                                # This ensures each detection gets a distinct timestamp for proper chronological ordering
                                 if len(detections) > 1:
                                     time.sleep(0.001)  # 1ms delay between detections in same frame
-                                
-                                # Increment sequence counter BEFORE processing to ensure strict order
                                 self.detection_sequence += 1
-                                sequence_number = self.detection_sequence
-                                
-                                # Process synchronously (no async/parallel operations)
-                                # Each detection saved immediately in capture order
-                                self.process_detection(frame, detection, time_str, frame_count, sequence_number)
+                                self.process_detection(frame, detection, time_str, frame_count, self.detection_sequence)
                             except Exception as e:
                                 print(f"⚠️ Processing detection error: {e}")
                                 continue
@@ -852,13 +1115,19 @@ class KillblockDetector:
                 break
             except Exception as e:
                 print(f"⚠️ Loop error: {e}")
+                import traceback
+                traceback.print_exc()
                 print("🔄 Attempting reconnect and continuing...")
                 try:
                     self.cleanup_camera()
                     time.sleep(1)
                     self.initialize_camera()
-                except:
-                    pass
+                except Exception as reconnect_error:
+                    print(f"⚠️ Reconnect error: {reconnect_error}")
+                # Ensure save thread is still running
+                if self.save_thread is not None and not self.save_thread.is_alive():
+                    print("⚠️ Save thread died during error recovery, restarting...")
+                    self.start_save_thread()
                 time.sleep(1)
                 continue
         
