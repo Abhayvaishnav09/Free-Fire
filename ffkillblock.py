@@ -10,6 +10,7 @@ import datetime
 from text import FreeFireTextDetector
 import queue
 import threading
+import json
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 os.environ.setdefault('OMP_NUM_THREADS', '1')
@@ -17,6 +18,9 @@ os.environ.setdefault('OMP_NUM_THREADS', '1')
 warnings.filterwarnings("ignore")
 
 class KillblockDetector:
+    # State persistence file path
+    STATE_FILE = "match_state.json"
+    
     def __init__(self):
         print("Initializing Killblock Detector...")
         self.model = self.load_model()
@@ -30,21 +34,100 @@ class KillblockDetector:
         self.duplicate_window = 8
         self.cap = None
         self.camera_initialized = False
-        self.detection_sequence = 0  # Sequential counter to ensure chronological order
+        
+        # Thread-safe state persistence
+        self.state_lock = threading.Lock()
+        
+        # Load persistent state (resume from previous session)
+        state = self.load_state()
+        self.detection_sequence = state.get('detection_sequence', 0)  # Resume sequence number
+        self.detected_count = state.get('detected_count', 0)
+        self.saved_count = state.get('saved_count', 0)
+        self.failed_count = state.get('failed_count', 0)
+        self.frame_count_offset = state.get('frame_count_offset', 0)  # Offset for frame counting
+        
+        if self.detection_sequence > 0:
+            print(f"📋 Resumed match state - Sequence: {self.detection_sequence}, Detected: {self.detected_count}, Saved: {self.saved_count}")
         
         # Thread-safe image saving system
         self.save_queue = queue.Queue(maxsize=1000)  # Thread-safe queue for processed images
         self.save_thread = None
         self.save_thread_running = False
-        self.detected_count = 0  # Total frames detected
-        self.saved_count = 0  # Total frames successfully saved
-        self.failed_count = 0  # Total frames that failed to save
         
         print("Detector ready!")
     
     def __del__(self):
         self.stop_save_thread()
+        self.save_state()  # Save state before destruction
         self.cleanup_camera()
+    
+    def load_state(self):
+        """Load persistent match state from file. Returns empty dict if no state exists."""
+        try:
+            if os.path.exists(self.STATE_FILE):
+                with open(self.STATE_FILE, 'r', encoding='utf-8') as f:
+                    state = json.load(f)
+                    # Validate state structure
+                    if isinstance(state, dict):
+                        return state
+                    else:
+                        print(f"⚠️ Invalid state file format, starting fresh")
+                        return {}
+            return {}
+        except json.JSONDecodeError as e:
+            print(f"⚠️ Corrupted state file, starting fresh: {e}")
+            # Backup corrupted file
+            try:
+                backup_name = f"{self.STATE_FILE}.corrupted_{int(time.time())}"
+                os.rename(self.STATE_FILE, backup_name)
+                print(f"📦 Backed up corrupted state to: {backup_name}")
+            except:
+                pass
+            return {}
+        except Exception as e:
+            print(f"⚠️ Error loading state: {e}, starting fresh")
+            return {}
+    
+    def save_state(self):
+        """Save current match state to file. Thread-safe and atomic."""
+        try:
+            with self.state_lock:
+                state = {
+                    'detection_sequence': self.detection_sequence,
+                    'detected_count': self.detected_count,
+                    'saved_count': self.saved_count,
+                    'failed_count': self.failed_count,
+                    'frame_count_offset': getattr(self, 'frame_count_offset', 0),
+                    'last_saved': datetime.datetime.now().isoformat(),
+                    'timestamp': time.time()
+                }
+                
+                # Atomic write: write to temp file, then rename
+                temp_file = f"{self.STATE_FILE}.tmp"
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(state, f, indent=2, ensure_ascii=False)
+                
+                # Atomic rename (works on Windows and Unix)
+                if os.path.exists(self.STATE_FILE):
+                    os.replace(temp_file, self.STATE_FILE)
+                else:
+                    os.rename(temp_file, self.STATE_FILE)
+        except Exception as e:
+            print(f"⚠️ Error saving state: {e}")
+    
+    def reset_state(self):
+        """Reset match state to start a new match. Use with caution."""
+        try:
+            with self.state_lock:
+                self.detection_sequence = 0
+                self.detected_count = 0
+                self.saved_count = 0
+                self.failed_count = 0
+                self.frame_count_offset = 0
+                self.save_state()
+                print("🔄 Match state reset - starting new match")
+        except Exception as e:
+            print(f"⚠️ Error resetting state: {e}")
     
     def load_model(self):
         try:
@@ -276,7 +359,7 @@ class KillblockDetector:
         """Primary detection method: Analyzes victim name text color for KNOCKED/FINISHED status.
         Focuses strictly on the victim name text region to avoid UI theme interference.
         WHITE text = KNOCKED, RED text = FINISHED. Color-scheme independent and reliable.
-        PERFECTLY SEPARATED: Zero overlap between red and white detection ranges."""
+        STRENGTHENED FINISHED DETECTION: More sensitive red detection with multiple validation layers."""
         try:
             if cropped_image is None or cropped_image.size == 0:
                 return "UNKNOWN"
@@ -300,33 +383,40 @@ class KillblockDetector:
             # Convert to HSV for color analysis
             hsv_image = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)
             
-            # PERFECTLY SEPARATED RED HSV ranges for FINISHED
-            # Red requires: High saturation (>= 80) AND high value (>= 90)
-            # This ensures NO overlap with white which has low saturation
-            # Primary red range (0-12°): Pure red with very high saturation
-            lower_red1 = np.array([0, 80, 90])   # Saturation >= 80, Value >= 90
-            upper_red1 = np.array([12, 255, 255])
+            # STRENGTHENED RED HSV ranges for FINISHED - More sensitive detection
+            # Primary red range (0-15°): Pure red with moderate-high saturation (lowered from 80 to 60)
+            # Lowered saturation threshold to catch more red variations
+            lower_red1_primary = np.array([0, 60, 70])   # Saturation >= 60, Value >= 70 (more sensitive)
+            upper_red1_primary = np.array([15, 255, 255])
             
-            # Secondary red range (168-180°): Wrap-around red with very high saturation
-            lower_red2 = np.array([168, 80, 90])  # Matching strict criteria
-            upper_red2 = np.array([180, 255, 255])
+            # Secondary red range (165-180°): Wrap-around red with moderate-high saturation
+            lower_red2_primary = np.array([165, 60, 70])  # More sensitive
+            upper_red2_primary = np.array([180, 255, 255])
             
-            # PERFECTLY SEPARATED WHITE HSV range for KNOCKED
+            # Additional relaxed red ranges for catching faint red signals
+            # These catch red colors that might be slightly desaturated or darker
+            lower_red1_relaxed = np.array([0, 50, 60])   # Even more sensitive for faint red
+            upper_red1_relaxed = np.array([18, 255, 255])
+            lower_red2_relaxed = np.array([162, 50, 60])
+            upper_red2_relaxed = np.array([180, 255, 255])
+            
+            # PERFECTLY SEPARATED WHITE HSV range for KNOCKED (unchanged)
             # White requires: Very low saturation (<= 15) AND very high value (>= 210)
             # This ensures NO overlap with red which has high saturation
             lower_white = np.array([0, 0, 210])   # Saturation <= 15, Value >= 210
             upper_white = np.array([180, 15, 255])
             
-            # CRITICAL SEPARATION GUARANTEE:
-            # - Red: Saturation >= 80, Value >= 90
-            # - White: Saturation <= 15, Value >= 210
-            # - Gap: 65 saturation points between ranges (80-15=65)
-            # - This creates IMPOSSIBLE overlap condition
+            # Create red masks with multiple sensitivity levels
+            mask_red1_primary = cv2.inRange(hsv_image, lower_red1_primary, upper_red1_primary)
+            mask_red2_primary = cv2.inRange(hsv_image, lower_red2_primary, upper_red2_primary)
+            mask_red_primary = cv2.bitwise_or(mask_red1_primary, mask_red2_primary)
             
-            # Create red masks with strict criteria
-            mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
-            mask_red2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
-            mask_red_combined = cv2.bitwise_or(mask_red1, mask_red2)
+            mask_red1_relaxed = cv2.inRange(hsv_image, lower_red1_relaxed, upper_red1_relaxed)
+            mask_red2_relaxed = cv2.inRange(hsv_image, lower_red2_relaxed, upper_red2_relaxed)
+            mask_red_relaxed = cv2.bitwise_or(mask_red1_relaxed, mask_red2_relaxed)
+            
+            # Combine primary and relaxed masks (union)
+            mask_red_combined = cv2.bitwise_or(mask_red_primary, mask_red_relaxed)
             
             # Create white mask with strict criteria
             mask_white_raw = cv2.inRange(hsv_image, lower_white, upper_white)
@@ -345,57 +435,95 @@ class KillblockDetector:
             red_ratio = red_pixels / total_pixels if total_pixels > 0 else 0.0
             white_ratio = white_pixels / total_pixels if total_pixels > 0 else 0.0
             
+            # Additional validation: Check RGB space for red confirmation
+            # Convert to BGR (OpenCV format) for RGB analysis
+            bgr_image = text_region
+            red_rgb_pixels = 0
+            white_rgb_pixels = 0
+            
+            # Analyze RGB values for additional red/white confirmation
+            for y in range(0, bgr_image.shape[0], max(1, bgr_image.shape[0] // 20)):  # Sample every 5% of rows
+                for x in range(0, bgr_image.shape[1], max(1, bgr_image.shape[1] // 20)):  # Sample every 5% of cols
+                    b, g, r = bgr_image[y, x]
+                    brightness = (r + g + b) / 3
+                    
+                    # Red detection in RGB: R significantly higher than G and B
+                    if r > g + 30 and r > b + 30 and r > 100:
+                        red_rgb_pixels += 1
+                    # White detection in RGB: High brightness with balanced RGB
+                    elif brightness > 200 and abs(r - g) < 20 and abs(g - b) < 20:
+                        white_rgb_pixels += 1
+            
+            rgb_sample_size = max(1, (bgr_image.shape[0] // max(1, bgr_image.shape[0] // 20)) * 
+                                  (bgr_image.shape[1] // max(1, bgr_image.shape[1] // 20)))
+            red_rgb_ratio = red_rgb_pixels / rgb_sample_size if rgb_sample_size > 0 else 0.0
+            white_rgb_ratio = white_rgb_pixels / rgb_sample_size if rgb_sample_size > 0 else 0.0
+            
             # Debug output
             print(f"🔍 HSV color analysis - Red ratio: {red_ratio:.4f} ({red_pixels} px), White ratio: {white_ratio:.4f} ({white_pixels} px)")
+            print(f"🔍 RGB validation - Red ratio: {red_rgb_ratio:.4f}, White ratio: {white_rgb_ratio:.4f}")
             
-            # SPECIAL CASE: One color is completely absent (zero ratio)
+            # STRENGTHENED FINISHED DETECTION LOGIC - Multiple validation layers
+            
+            # LAYER 1: SPECIAL CASE - One color is completely absent (zero ratio)
             # If one ratio is 0 and the other is significant, the decision is clear
             if red_ratio == 0 and white_ratio >= 0.010:
                 print(f"✅ KNOCKED detected - White present, red absent (ratio: {white_ratio:.4f})")
                 return "KNOCKED"
             
-            if white_ratio == 0 and red_ratio >= 0.010:
+            if white_ratio == 0 and red_ratio >= 0.008:  # Lowered threshold from 0.010 to 0.008
                 print(f"✅ FINISHED detected - Red present, white absent (ratio: {red_ratio:.4f})")
                 return "FINISHED"
             
-            # VALIDATION: Ensure only one status is detected (mutual exclusion)
-            # If both ratios are significant, choose the dominant one with clear margin
+            # LAYER 2: RGB VALIDATION - If RGB confirms red, boost confidence
+            rgb_red_boost = 0.0
+            if red_rgb_ratio > 0.05:  # Significant red in RGB space
+                rgb_red_boost = 0.005  # Boost red ratio by 0.5% for RGB confirmation
+                print(f"🔍 RGB validation confirms red presence (boost: +{rgb_red_boost:.4f})")
             
-            # STRICT DECISION LOGIC - No ambiguity allowed
-            # Primary thresholds (high confidence) - require clear dominance
-            red_threshold_primary = 0.020   # Require meaningful red presence
-            white_threshold_primary = 0.020  # Require meaningful white presence
-            dominance_ratio_primary = 3.0   # One color must be 3x the other (stricter)
+            # Adjusted red ratio with RGB boost
+            red_ratio_adjusted = red_ratio + rgb_red_boost
             
-            # Secondary thresholds (medium confidence) - still require clear dominance
-            red_threshold_secondary = 0.015
+            # LAYER 3: STRENGTHENED DECISION LOGIC - More lenient thresholds for FINISHED
+            # Primary thresholds (high confidence) - Lowered for red to catch more FINISHED cases
+            red_threshold_primary = 0.015   # Lowered from 0.020 (more sensitive)
+            white_threshold_primary = 0.020  # Keep white threshold same
+            dominance_ratio_primary = 2.5   # Lowered from 3.0 (red needs less dominance)
+            
+            # Secondary thresholds (medium confidence) - More lenient for red
+            red_threshold_secondary = 0.010  # Lowered from 0.015
             white_threshold_secondary = 0.015
-            dominance_ratio_secondary = 2.5
+            dominance_ratio_secondary = 2.0  # Lowered from 2.5
             
-            # PRIMARY DECISION: HIGH CONFIDENCE - Clear dominance required
-            if red_ratio >= red_threshold_primary:
-                if white_ratio == 0 or red_ratio >= white_ratio * dominance_ratio_primary:
+            # Tertiary thresholds (low confidence but still valid) - Catch faint red signals
+            red_threshold_tertiary = 0.006   # Very sensitive for faint red
+            white_threshold_tertiary = 0.010
+            dominance_ratio_tertiary = 1.8   # Even more lenient
+            
+            # PRIMARY DECISION: HIGH CONFIDENCE - Use adjusted red ratio
+            if red_ratio_adjusted >= red_threshold_primary:
+                if white_ratio == 0 or red_ratio_adjusted >= white_ratio * dominance_ratio_primary:
                     # Additional validation: ensure red is significantly higher
-                    if red_ratio > white_ratio + 0.010:  # At least 1% absolute difference
-                        dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
-                        print(f"✅ FINISHED detected - Primary red HSV signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
+                    if red_ratio_adjusted > white_ratio + 0.008:  # Lowered from 0.010
+                        dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
+                        print(f"✅ FINISHED detected - Primary red HSV signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
                         return "FINISHED"
             
             if white_ratio >= white_threshold_primary:
                 if red_ratio == 0 or white_ratio >= red_ratio * dominance_ratio_primary:
                     # Additional validation: ensure white is significantly higher
-                    if white_ratio > red_ratio + 0.010:  # At least 1% absolute difference
+                    if white_ratio > red_ratio + 0.010:  # Keep white threshold same
                         dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
                         print(f"✅ KNOCKED detected - Primary white HSV signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
                         return "KNOCKED"
             
-            # SECONDARY DECISION: MEDIUM CONFIDENCE - Still require clear dominance
-            if red_ratio >= red_threshold_secondary:
-                if white_ratio == 0 or red_ratio >= white_ratio * dominance_ratio_secondary:
+            # SECONDARY DECISION: MEDIUM CONFIDENCE - More lenient for red
+            if red_ratio_adjusted >= red_threshold_secondary:
+                if white_ratio == 0 or red_ratio_adjusted >= white_ratio * dominance_ratio_secondary:
                     # Additional validation: ensure red is clearly dominant
-                    if red_ratio > white_ratio * 2.0 and red_ratio > white_ratio + 0.008:
-                        dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
-                        print(f"✅ FINISHED detected - Secondary red HSV signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
+                    if red_ratio_adjusted > white_ratio * 1.8 and red_ratio_adjusted > white_ratio + 0.006:  # More lenient
+                        dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
+                        print(f"✅ FINISHED detected - Secondary red HSV signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
                         return "FINISHED"
             
             if white_ratio >= white_threshold_secondary:
@@ -406,13 +534,26 @@ class KillblockDetector:
                         print(f"✅ KNOCKED detected - Secondary white HSV signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
                         return "KNOCKED"
             
-            # FINAL FALLBACK: Very clear dominance with minimum presence
-            # Only use if one color is clearly dominant (2.5x) and has minimum presence
-            if white_ratio == 0 or red_ratio > white_ratio * 2.5:
-                if red_ratio >= 0.010:  # Minimum meaningful red presence
-                    dominance = red_ratio / white_ratio if white_ratio > 0 else float('inf')
-                    print(f"✅ FINISHED detected - Fallback red signal (ratio: {red_ratio:.4f}, dominance: {dominance:.2f}x)")
-                    return "FINISHED"
+            # TERTIARY DECISION: LOW CONFIDENCE - Catch faint red signals (NEW LAYER)
+            if red_ratio_adjusted >= red_threshold_tertiary:
+                if white_ratio == 0 or red_ratio_adjusted >= white_ratio * dominance_ratio_tertiary:
+                    # Additional validation: ensure red is present and dominant
+                    if red_ratio_adjusted > white_ratio * 1.5 and red_ratio_adjusted > white_ratio + 0.004:
+                        # RGB validation must also confirm red
+                        if red_rgb_ratio > 0.03 or red_ratio_adjusted > 0.008:
+                            dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
+                            print(f"✅ FINISHED detected - Tertiary red HSV signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
+                            return "FINISHED"
+            
+            # LAYER 4: FALLBACK - Very clear dominance with minimum presence
+            # Favor red when both are present with similar ratios (strengthened for FINISHED)
+            if red_ratio_adjusted > 0.005:  # Any meaningful red presence
+                if white_ratio == 0 or red_ratio_adjusted >= white_ratio * 1.5:  # More lenient (was 2.5)
+                    # RGB validation confirms red
+                    if red_rgb_ratio > 0.02 or red_ratio_adjusted > white_ratio + 0.003:
+                        dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
+                        print(f"✅ FINISHED detected - Fallback red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
+                        return "FINISHED"
             
             if red_ratio == 0 or white_ratio > red_ratio * 2.5:
                 if white_ratio >= 0.010:  # Minimum meaningful white presence
@@ -420,10 +561,24 @@ class KillblockDetector:
                     print(f"✅ KNOCKED detected - Fallback white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
                     return "KNOCKED"
             
+            # LAYER 5: FINAL FALLBACK - When both ratios are very low or similar
+            # If red is present at all (even faint), and white is not clearly dominant, favor FINISHED
+            if red_ratio_adjusted > 0.003 and white_ratio < 0.015:  # Faint red, low white
+                if red_rgb_ratio > 0.01:  # RGB confirms red
+                    print(f"✅ FINISHED detected - Final fallback (faint red confirmed by RGB, red: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
+                    return "FINISHED"
+            
             # DEFAULT: If truly ambiguous (both ratios low or similar), default to KNOCKED
-            # This is the most common case in Free Fire
-            print(f"⚠️ Ambiguous color - defaulting to KNOCKED (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
-            return "KNOCKED"
+            # This is the most common case in Free Fire, but only if red is truly absent
+            if red_ratio < 0.003 and white_ratio < 0.010:
+                print(f"⚠️ Ambiguous color - defaulting to KNOCKED (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
+                return "KNOCKED"
+            elif red_ratio_adjusted > 0.003:  # If any red is present, favor FINISHED
+                print(f"✅ FINISHED detected - Final decision (red present: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
+                return "FINISHED"
+            else:
+                print(f"⚠️ Ambiguous color - defaulting to KNOCKED (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
+                return "KNOCKED"
             
         except Exception as e:
             print(f"⚠️ Color analysis error: {e}")
@@ -790,6 +945,10 @@ class KillblockDetector:
                 print(f"   📊 Status: {status} | 📈 Confidence: {detection['confidence']:.2f}")
                 print(f"   🔢 Order: #{sequence_number} (Frame: {frame_number})")
                 print(f"   💾 Queue size: {self.save_queue.qsize()} | Detected: {self.detected_count}\n")
+                
+                # Save state after each detection (critical for resume)
+                self.save_state()
+                
                 return True
             except queue.Full:
                 print(f"⚠️ Save queue full, retrying...")
@@ -924,11 +1083,17 @@ class KillblockDetector:
                     print(f"   📊 Status: {metadata.get('status', '')} | 📈 Confidence: {metadata.get('confidence', 0.0):.2f}")
                     print(f"   🔢 Order: #{metadata.get('sequence_number', 0)} (Frame: {metadata.get('frame_number', 0)})")
                     print(f"   💾 Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed\n")
+                    # Save state periodically when counts change (every 5 saves)
+                    if self.saved_count % 5 == 0:
+                        self.save_state()
                 else:
                     self.failed_count += 1
                     error_msg = f": {last_error}" if last_error else ""
                     print(f"❌ Failed to save after {max_retries} retries{error_msg}: {os.path.basename(filepath)}")
                     print(f"   💾 Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed\n")
+                    # Save state on failures too (to track failed_count)
+                    if self.failed_count % 5 == 0:
+                        self.save_state()
                 
                 # Mark task as done
                 self.save_queue.task_done()
@@ -977,6 +1142,9 @@ class KillblockDetector:
             
             # Print final statistics
             print(f"📊 Final Save Stats: {self.saved_count} saved / {self.detected_count} detected / {self.failed_count} failed")
+            
+            # Save state after stopping thread
+            self.save_state()
 
     def start_detection(self):
         """Main detection loop - runs continuously until user stops with Ctrl+C."""
@@ -995,12 +1163,14 @@ class KillblockDetector:
         self.start_save_thread()
         
         detection_count = 0
-        frame_count = 0
+        frame_count = self.frame_count_offset  # Resume frame count from saved offset
         last_detection_time = 0
         consecutive_failures = 0
         max_failures = 100  # Allow many failures before reconnecting
         last_save_thread_check = time.time()
         save_thread_check_interval = 10  # Check every 10 seconds
+        last_state_save = time.time()
+        state_save_interval = 30  # Save state every 30 seconds
         
         while True:
             try:
@@ -1109,9 +1279,19 @@ class KillblockDetector:
                 # Status update every 50 frames
                 if frame_count % 50 == 0:
                     print(f"⏳ Still running... Frame #{frame_count}")
+                
+                # Periodic state save (every 30 seconds)
+                current_time_check = time.time()
+                if current_time_check - last_state_save > state_save_interval:
+                    self.frame_count_offset = frame_count  # Update frame offset
+                    self.save_state()
+                    last_state_save = current_time_check
             
             except KeyboardInterrupt:
                 print("\n\n⏹️ Detection stopped by user (Ctrl+C)")
+                # Save state before exit
+                self.frame_count_offset = frame_count
+                self.save_state()
                 break
             except Exception as e:
                 print(f"⚠️ Loop error: {e}")
@@ -1133,6 +1313,9 @@ class KillblockDetector:
         
         # Clean up before exiting
         try:
+            # Save final state before cleanup
+            self.frame_count_offset = frame_count
+            self.save_state()
             self.stop_save_thread()
             self.cleanup_camera()
         except:
@@ -1155,6 +1338,11 @@ def main():
     except KeyboardInterrupt:
         print("\n⏹️ Stopping detection")
     finally:
+        # Save state before cleanup
+        try:
+            detector.save_state()
+        except:
+            pass
         detector.stop_save_thread()
         detector.cleanup_camera()
 
