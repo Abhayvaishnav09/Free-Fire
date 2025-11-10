@@ -10,12 +10,14 @@ Date: 2024
 
 import cv2
 import numpy as np
-import paddleocr
 import os
 from datetime import datetime
 from typing import List, Dict, Tuple
 from sklearn.cluster import KMeans
 from collections import Counter
+
+# Lazy import of paddleocr - will be imported only when FreeFireTextDetector is instantiated
+# This prevents OSError during module import
 
 class FreeFireTextDetector:
     """
@@ -26,6 +28,7 @@ class FreeFireTextDetector:
         """
         Initialize the Free Fire text detector with PaddleOCR.
         """
+        # Lazy import - only import when actually needed
         try:
             import paddleocr
             import logging
@@ -39,8 +42,21 @@ class FreeFireTextDetector:
                 use_gpu=False    # Use CPU for stability
             )
             print("PaddleOCR initialized successfully")
-        except ImportError:
-            raise ImportError("PaddleOCR is not available. Please install paddleocr.")
+        except OSError as e:
+            error_msg = str(e)
+            if "shm.dll" in error_msg or "WinError 127" in error_msg:
+                raise ImportError(
+                    f"Failed to load PyTorch DLLs: {e}\n"
+                    "💡 Solution: Install Visual C++ Redistributables from:\n"
+                    "   https://aka.ms/vs/17/release/vc_redist.x64.exe\n"
+                    "   Or reinstall PyTorch: pip install --force-reinstall torch"
+                )
+            else:
+                raise ImportError(f"Failed to initialize PaddleOCR: {e}")
+        except ImportError as e:
+            raise ImportError(f"Failed to import paddleocr: {e}. Please install paddleocr: pip install paddleocr")
+        except Exception as e:
+            raise ImportError(f"Failed to initialize PaddleOCR: {e}")
         
         # Disable name saving outputs
         self.output_dir = None

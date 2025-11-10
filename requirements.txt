@@ -8,3 +8,6 @@ paddleocr
 streamlit
 ultralytics
 scikit-learn
+requests
+grpcio
+grpcio-tools
