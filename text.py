@@ -35,12 +35,8 @@ class FreeFireTextDetector:
             # Disable PaddleOCR debug output
             logging.getLogger('ppocr').setLevel(logging.WARNING)
             
-            self.paddleocr_reader = paddleocr.PaddleOCR(
-                use_angle_cls=True, 
-                lang='en',
-                show_log=False,  # Disable debug output
-                use_gpu=False    # Use CPU for stability
-            )
+            # PaddleOCR 3.3.1+ uses new simplified API
+            self.paddleocr_reader = paddleocr.PaddleOCR(lang='en')
             print("PaddleOCR initialized successfully")
         except OSError as e:
             error_msg = str(e)
@@ -395,59 +391,195 @@ class FreeFireTextDetector:
         Returns:
             List[Dict]: List of text detection results
         """
-        # Try detection on original image first
-        try:
-            results_original = self.paddleocr_reader.ocr(image, cls=True)
-        except Exception as e:
-            print(f"⚠️ OCR error on original image: {e}")
-            results_original = [[None]]
+        formatted_results = []
         
-        # Only try preprocessed image if original didn't find enough text
-        if not results_original[0] or len(results_original[0]) < 2:
+        # Validate image before processing
+        if image is None or not isinstance(image, np.ndarray):
+            return []
+        
+        # Ensure image is in correct format
+        if len(image.shape) != 3 or image.shape[2] != 3:
+            return []
+        
+        height, width = image.shape[:2]
+        if height < 10 or width < 10:
+            return []
+        
+        # Ensure uint8 type
+        if image.dtype != np.uint8:
+            if image.dtype in [np.float32, np.float64]:
+                if image.max() <= 1.0:
+                    image = (image * 255).astype(np.uint8)
+                else:
+                    image = image.astype(np.uint8)
+            else:
+                image = image.astype(np.uint8)
+        
+        # Try detection on original image first
+        # PaddleOCR 3.3.1+ uses predict() method with new format
+        try:
+            # Use predict() method for new API
+            predict_result = self.paddleocr_reader.predict(image)
+            
+            # New API returns list with dict containing: rec_texts, rec_scores, rec_polys
+            if isinstance(predict_result, list) and len(predict_result) > 0:
+                result_dict = predict_result[0]
+                if isinstance(result_dict, dict):
+                    rec_texts = result_dict.get('rec_texts', [])
+                    rec_scores = result_dict.get('rec_scores', [])
+                    rec_polys = result_dict.get('rec_polys', [])
+                    
+                    # Combine text, scores, and polygons
+                    for i, text in enumerate(rec_texts):
+                        if i < len(rec_scores) and i < len(rec_polys):
+                            conf = float(rec_scores[i]) if i < len(rec_scores) else 0.0
+                            poly = rec_polys[i] if i < len(rec_polys) else None
+                            
+                            # Check if we have valid data - handle numpy arrays in text
+                            if conf > 0.005:
+                                # Convert text to string if it's not already
+                                if not isinstance(text, str):
+                                    if hasattr(text, 'item'):
+                                        text = str(text.item())
+                                    else:
+                                        text = str(text)
+                                
+                                if text and len(text.strip()) > 0:
+                                    # Convert polygon to bbox - handle numpy arrays properly
+                                    if poly is not None:
+                                        try:
+                                            # Convert to list if it's a numpy array
+                                            if hasattr(poly, 'tolist'):
+                                                poly = poly.tolist()
+                                            
+                                            # Ensure poly is a list of points
+                                            if isinstance(poly, list) and len(poly) > 0:
+                                                # Handle different poly formats
+                                                if isinstance(poly[0], (list, tuple)) and len(poly[0]) >= 2:
+                                                    x_coords = [float(point[0]) for point in poly]
+                                                    y_coords = [float(point[1]) for point in poly]
+                                                    x, y = min(x_coords), min(y_coords)
+                                                    w = max(x_coords) - x
+                                                    h = max(y_coords) - y
+                                                    
+                                                    cleaned_text = self._clean_text(text.strip())
+                                                    if cleaned_text and len(cleaned_text) > 1:
+                                                        # Filter out very small text regions (likely noise)
+                                                        if w > 10 and h > 8:
+                                                            formatted_results.append({
+                                                                'text': cleaned_text,
+                                                                'bbox': (int(x), int(y), int(w), int(h)),
+                                                                'confidence': conf
+                                                            })
+                                        except Exception as e:
+                                            # Skip this text if polygon parsing fails
+                                            continue
+                    
+                    if formatted_results:
+                        return formatted_results
+        except RuntimeError as e:
+            # PaddleOCR runtime errors - try fallback method
+            error_msg = str(e).lower()
+            if "unknown exception" in error_msg or "runtime" in error_msg:
+                # Silently try fallback - don't print error
+                pass
+            else:
+                # Other runtime errors - log but continue
+                pass
+        except Exception as e:
+            error_msg = str(e)
+            # Don't print verbose errors - just continue to fallback
+            pass
+        
+        # Fallback: Try ocr() method (older API compatibility)
+        try:
+            results_original = self.paddleocr_reader.ocr(image)
+            if results_original and isinstance(results_original, list) and len(results_original) > 0:
+                results = results_original[0] if isinstance(results_original[0], list) else results_original
+                
+                for line in results:
+                    if line is None or len(line) < 2:
+                        continue
+                    
+                    try:
+                        bbox, (text, conf) = line
+                        if conf > 0.005:
+                            x_coords = [point[0] for point in bbox]
+                            y_coords = [point[1] for point in bbox]
+                            x, y = min(x_coords), min(y_coords)
+                            w = max(x_coords) - x
+                            h = max(y_coords) - y
+                            
+                            cleaned_text = self._clean_text(text.strip())
+                            if cleaned_text and len(cleaned_text) > 1:
+                                if w > 10 and h > 8:
+                                    formatted_results.append({
+                                        'text': cleaned_text,
+                                        'bbox': (int(x), int(y), int(w), int(h)),
+                                        'confidence': conf
+                                    })
+                    except Exception:
+                        continue
+        except Exception as e:
+            print(f"⚠️ OCR fallback error: {e}")
+        
+        # If still no results, try preprocessed image
+        if not formatted_results:
             try:
                 processed_image = self.preprocess_image(image)
-                results_processed = self.paddleocr_reader.ocr(processed_image, cls=True)
+                predict_result = self.paddleocr_reader.predict(processed_image)
                 
-                # Use processed results if they have more detections
-                if results_processed[0] and len(results_processed[0]) > len(results_original[0]):
-                    results = results_processed[0]
-                else:
-                    results = results_original[0] if results_original[0] else []
+                if isinstance(predict_result, list) and len(predict_result) > 0:
+                    result_dict = predict_result[0]
+                    if isinstance(result_dict, dict):
+                        rec_texts = result_dict.get('rec_texts', [])
+                        rec_scores = result_dict.get('rec_scores', [])
+                        rec_polys = result_dict.get('rec_polys', [])
+                        
+                        for i, text in enumerate(rec_texts):
+                            if i < len(rec_scores) and i < len(rec_polys):
+                                conf = float(rec_scores[i]) if i < len(rec_scores) else 0.0
+                                poly = rec_polys[i] if i < len(rec_polys) else None
+                                
+                                # Check if we have valid data - handle numpy arrays in text
+                                if conf > 0.005:
+                                    # Convert text to string if it's not already
+                                    if not isinstance(text, str):
+                                        if hasattr(text, 'item'):
+                                            text = str(text.item())
+                                        else:
+                                            text = str(text)
+                                    
+                                    if text and len(text.strip()) > 0:
+                                        if poly is not None:
+                                            try:
+                                                # Convert to list if it's a numpy array
+                                                if hasattr(poly, 'tolist'):
+                                                    poly = poly.tolist()
+                                                
+                                                # Ensure poly is a list of points
+                                                if isinstance(poly, list) and len(poly) > 0:
+                                                    # Handle different poly formats
+                                                    if isinstance(poly[0], (list, tuple)) and len(poly[0]) >= 2:
+                                                        x_coords = [float(point[0]) for point in poly]
+                                                        y_coords = [float(point[1]) for point in poly]
+                                                        x, y = min(x_coords), min(y_coords)
+                                                        w = max(x_coords) - x
+                                                        h = max(y_coords) - y
+                                                        
+                                                        cleaned_text = self._clean_text(text.strip())
+                                                        if cleaned_text and len(cleaned_text) > 1:
+                                                            if w > 10 and h > 8:
+                                                                formatted_results.append({
+                                                                    'text': cleaned_text,
+                                                                    'bbox': (int(x), int(y), int(w), int(h)),
+                                                                    'confidence': conf
+                                                                })
+                                            except Exception as e:
+                                                # Skip this text if polygon parsing fails
+                                                continue
             except Exception as e:
                 print(f"⚠️ OCR error on processed image: {e}")
-                results = results_original[0] if results_original[0] else []
-        else:
-            results = results_original[0]
-        
-        formatted_results = []
-        if results is None:
-            return formatted_results
-            
-        for line in results:
-            if line is None or len(line) < 2:
-                continue
-                
-            try:
-                bbox, (text, conf) = line
-                if conf > 0.005:  # Very low confidence threshold
-                    # Convert bbox format from PaddleOCR to (x, y, w, h)
-                    x_coords = [point[0] for point in bbox]
-                    y_coords = [point[1] for point in bbox]
-                    x, y = min(x_coords), min(y_coords)
-                    w = max(x_coords) - x
-                    h = max(y_coords) - y
-                    
-                    cleaned_text = self._clean_text(text.strip())
-                    if cleaned_text and len(cleaned_text) > 1:
-                        # Filter out very small text regions (likely noise)
-                        if w > 10 and h > 8:
-                            formatted_results.append({
-                                'text': cleaned_text,
-                                'bbox': (int(x), int(y), int(w), int(h)),
-                                'confidence': conf
-                            })
-            except Exception as e:
-                continue
         
         return formatted_results
     
@@ -683,7 +815,7 @@ def main():
         if results.get("victim"):
             victim_text = results['victim']['text']
             victim_color = results['victim']['color']['name'].lower()
-            status = "finished" if victim_color == "red" else "knocked"
+            status = "kill" if victim_color == "red" else "gun knockout"
             print(f"{killer_text} - {status} - {victim_text}")
         else:
             print(f"{killer_text} - No victim detected")

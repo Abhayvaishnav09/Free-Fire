@@ -154,7 +154,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
         Returns:
             list: List of detection results, each containing:
                 - 'cropped_image': Cropped killfeed image
-                - 'status': Status (KNOCKED/KILL/REVIVED)
+                - 'status': Status (gun knockout/kill/revived)
                 - 'bbox': Bounding box coordinates [x1, y1, x2, y2]
                 - 'confidence': Detection confidence
                 - 'detection_sources': List of detection sources for REVIVED
@@ -272,9 +272,9 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
         Returns:
             tuple: (status, detection_sources)
                 - status: "KNOCKED", "KILL", or "REVIVED"
-                - detection_sources: List of sources that detected REVIVED (empty for KNOCKED/KILL)
+                - detection_sources: List of sources that detected revived (empty for gun knockout/kill)
         """
-        # Check for REVIVED first (highest priority)
+        # Check for revived first (highest priority)
         revive_in_crop = self._detect_revive_status(cropped_image)
         revive_in_frame = self._detect_revive_in_frame(full_frame)
         
@@ -289,26 +289,26 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             detection_sources.append("YOLO full frame")
             revive_confidence_score += 0.3
         
-        # REVIVED takes absolute priority
+        # revived takes absolute priority
         if detection_sources and revive_confidence_score >= 0.3:
-            status = "REVIVED"
-            logger.info(f"✅ STATUS: REVIVED (detected via {' + '.join(detection_sources)}, confidence: {revive_confidence_score:.2f})")
+            status = "revived"
+            logger.info(f"✅ STATUS: revived (detected via {' + '.join(detection_sources)}, confidence: {revive_confidence_score:.2f})")
             return status, detection_sources
         
-        # If not REVIVED, analyze color for KNOCKED/KILL
-        logger.debug("🔍 No REVIVED detected, checking color for KNOCKED/KILL...")
+        # If not revived, analyze color for gun knockout/kill
+        logger.debug("🔍 No revived detected, checking color for gun knockout/kill...")
         status = self._analyze_victim_color(cropped_image)
         
-        if status not in ["KNOCKED", "KILL", "UNKNOWN"]:
-            logger.warning(f"⚠️ Invalid status '{status}', defaulting to KNOCKED")
-            status = "KNOCKED"
+        if status not in ["gun knockout", "kill", "UNKNOWN"]:
+            logger.warning(f"⚠️ Invalid status '{status}', defaulting to gun knockout")
+            status = "gun knockout"
         
         if status == "UNKNOWN":
-            logger.warning(f"⚠️ Status detection returned UNKNOWN, defaulting to KNOCKED")
-            status = "KNOCKED"
+            logger.warning(f"⚠️ Status detection returned UNKNOWN, defaulting to gun knockout")
+            status = "gun knockout"
         
         status = self._validate_status_consistency(status)
-        color_name = {'KNOCKED': 'WHITE', 'KILL': 'RED'}.get(status, 'UNKNOWN')
+        color_name = {'gun knockout': 'WHITE', 'kill': 'RED'}.get(status, 'UNKNOWN')
         logger.info(f"✅ STATUS: {status} (victim name text color: {color_name})")
         
         return status, []
@@ -336,9 +336,9 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             if len(revive_detections) > 1:
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 if second_best[1] >= 0.15:
-                    logger.info(f"✅ REVIVED detected{context} - Strong multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Strong multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
-            logger.info(f"✅ REVIVED detected{context} - High confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            logger.info(f"✅ revived detected{context} - High confidence (Class: {class_name}, Confidence: {confidence:.3f})")
             return True
         
         # Medium-high confidence
@@ -346,9 +346,9 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             if len(revive_detections) > 1:
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 if second_best[1] >= 0.12:
-                    logger.info(f"✅ REVIVED detected{context} - Multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
-            logger.info(f"✅ REVIVED detected{context} - Medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            logger.info(f"✅ revived detected{context} - Medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
             return True
         
         # Medium confidence - require multiple confirmations
@@ -356,10 +356,10 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             if len(revive_detections) > 1:
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 if second_best[1] >= 0.10:
-                    logger.info(f"✅ REVIVED detected{context} - Multiple medium-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Multiple medium-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
             if confidence >= 0.18:
-                logger.info(f"✅ REVIVED detected{context} - Single medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+                logger.info(f"✅ revived detected{context} - Single medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
                 return True
         
         # Low confidence - require strong multiple confirmations
@@ -367,10 +367,10 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             if len(revive_detections) >= 2:
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 if second_best[1] >= 0.10:
-                    logger.info(f"✅ REVIVED detected{context} - Multiple low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Multiple low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
             if confidence >= 0.13:
-                logger.info(f"✅ REVIVED detected{context} - Single low-confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+                logger.info(f"✅ revived detected{context} - Single low-confidence (Class: {class_name}, Confidence: {confidence:.3f})")
                 return True
         
         # Very low confidence - require multiple strong confirmations
@@ -379,12 +379,12 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 third_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[2]
                 if second_best[1] >= 0.08 and third_best[1] >= 0.08:
-                    logger.info(f"✅ REVIVED detected{context} - Multiple very-low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f}, Third: {third_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Multiple very-low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f}, Third: {third_best[1]:.3f})")
                     return True
             if len(revive_detections) >= 2:
                 second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
                 if second_best[1] >= 0.09:
-                    logger.info(f"✅ REVIVED detected{context} - Strong pair confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    logger.info(f"✅ revived detected{context} - Strong pair confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
         
         return False
@@ -438,7 +438,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
         return self._validate_revive_detections(revive_detections)
     
     def _detect_revive_status(self, image):
-        """REVIVED detection using YOLOv11."""
+        """revived detection using YOLOv11."""
         try:
             return self._process_yolo_revive_detection(image)
         except Exception as e:
@@ -454,22 +454,22 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
     def _validate_status_consistency(self, status):
         """Final validation to ensure status consistency."""
         if status is None:
-            return "KNOCKED"
+            return "gun knockout"
         
-        status_upper = status.upper().strip()
-        valid_statuses = ["REVIVED", "KNOCKED", "KILL"]
+        status_lower = status.lower().strip()
+        valid_statuses = ["revived", "gun knockout", "kill"]
         
-        if status_upper not in valid_statuses:
-            logger.warning(f"⚠️ Invalid status '{status}', defaulting to KNOCKED")
-            return "KNOCKED"
+        if status_lower not in valid_statuses:
+            logger.warning(f"⚠️ Invalid status '{status}', defaulting to gun knockout")
+            return "gun knockout"
         
-        if status_upper == "REVIVED":
-            return "REVIVED"
+        if status_lower == "revived":
+            return "revived"
         
-        if status_upper in ["KNOCKED", "KILL"]:
-            return status_upper
+        if status_lower in ["gun knockout", "kill"]:
+            return status_lower
         
-        return "KNOCKED"
+        return "gun knockout"
     
     def _preprocess_text_region(self, image):
         """Preprocess image to enhance text visibility."""
@@ -513,7 +513,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             return None
     
     def _analyze_victim_color(self, cropped_image):
-        """Analyzes victim name text color for KNOCKED/KILL status with enhanced accuracy."""
+        """Analyzes victim name text color for gun knockout/kill status with enhanced accuracy."""
         try:
             if cropped_image is None or cropped_image.size == 0:
                 return "UNKNOWN"
@@ -534,7 +534,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             
             hsv_image = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)
             
-            # Sharper red detection ranges - stricter for KILL
+            # Sharper red detection ranges - stricter for kill
             lower_red1_primary = np.array([0, 70, 80])
             upper_red1_primary = np.array([12, 255, 255])
             lower_red2_primary = np.array([168, 70, 80])
@@ -545,7 +545,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             lower_red2_relaxed = np.array([165, 55, 65])
             upper_red2_relaxed = np.array([180, 255, 255])
             
-            # Sharper white detection - stricter for KNOCKED
+            # Sharper white detection - stricter for gun knockout
             lower_white_strict = np.array([0, 0, 220])
             upper_white_strict = np.array([180, 12, 255])
             lower_white_relaxed = np.array([0, 0, 200])
@@ -604,19 +604,19 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             logger.debug(f"🔍 HSV - Red: {red_ratio:.4f} ({red_pixels}px), White: {white_ratio:.4f} ({white_pixels}px), WhiteStrict: {white_strict_ratio:.4f}")
             logger.debug(f"🔍 RGB - Red: {red_rgb_ratio:.4f}, White: {white_rgb_ratio:.4f}")
             
-            # Early exit: Clear KNOCKED (strong white, no red)
+            # Early exit: Clear gun knockout (strong white, no red)
             if white_strict_ratio >= 0.015 and red_ratio < 0.003:
-                logger.info(f"✅ KNOCKED - Strong white signal, no red (white: {white_strict_ratio:.4f}, red: {red_ratio:.4f})")
-                return "KNOCKED"
+                logger.info(f"✅ gun knockout - Strong white signal, no red (white: {white_strict_ratio:.4f}, red: {red_ratio:.4f})")
+                return "gun knockout"
             
             if white_ratio >= 0.025 and red_ratio < 0.005:
-                logger.info(f"✅ KNOCKED - High white ratio, minimal red (white: {white_ratio:.4f}, red: {red_ratio:.4f})")
-                return "KNOCKED"
+                logger.info(f"✅ gun knockout - High white ratio, minimal red (white: {white_ratio:.4f}, red: {red_ratio:.4f})")
+                return "gun knockout"
             
-            # Early exit: Clear KILL (strong red, no white)
+            # Early exit: Clear kill (strong red, no white)
             if red_ratio >= 0.020 and white_ratio < 0.005:
-                logger.info(f"✅ KILL - Strong red signal, no white (red: {red_ratio:.4f}, white: {white_ratio:.4f})")
-                return "KILL"
+                logger.info(f"✅ kill - Strong red signal, no white (red: {red_ratio:.4f}, white: {white_ratio:.4f})")
+                return "kill"
             
             # RGB boost for red detection
             rgb_red_boost = 0.0
@@ -648,22 +648,22 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                     if red_ratio_adjusted > white_ratio + 0.010:
                         if red_rgb_ratio > 0.04 or red_ratio_adjusted > 0.020:
                             dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
-                            logger.info(f"✅ KILL - Primary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
-                            return "KILL"
+                            logger.info(f"✅ kill - Primary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
+                            return "kill"
             
             if white_strict_ratio >= white_threshold_primary:
                 if red_ratio < 0.005 or white_strict_ratio >= red_ratio * dominance_ratio_primary:
                     if white_strict_ratio > red_ratio + 0.015:
                         dominance = white_strict_ratio / red_ratio if red_ratio > 0 else float('inf')
-                        logger.info(f"✅ KNOCKED - Primary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
-                        return "KNOCKED"
+                        logger.info(f"✅ gun knockout - Primary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "gun knockout"
             
             if white_ratio >= white_threshold_primary:
                 if red_ratio < 0.006 or white_ratio >= red_ratio * dominance_ratio_primary:
                     if white_ratio > red_ratio + 0.012:
                         dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
-                        logger.info(f"✅ KNOCKED - Primary white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
-                        return "KNOCKED"
+                        logger.info(f"✅ gun knockout - Primary white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "gun knockout"
             
             # Secondary decision layer
             if red_ratio_adjusted >= red_threshold_secondary:
@@ -671,22 +671,22 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                     if red_ratio_adjusted > white_ratio * 2.0 and red_ratio_adjusted > white_ratio + 0.008:
                         if red_rgb_ratio > 0.05 or red_ratio_adjusted > 0.015:
                             dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
-                            logger.info(f"✅ KILL - Secondary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
-                            return "KILL"
+                            logger.info(f"✅ kill - Secondary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
+                            return "kill"
             
             if white_strict_ratio >= white_threshold_secondary:
                 if red_ratio < 0.008 or white_strict_ratio >= red_ratio * dominance_ratio_secondary:
                     if white_strict_ratio > red_ratio * 2.5 and white_strict_ratio > red_ratio + 0.010:
                         dominance = white_strict_ratio / red_ratio if red_ratio > 0 else float('inf')
-                        logger.info(f"✅ KNOCKED - Secondary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
-                        return "KNOCKED"
+                        logger.info(f"✅ gun knockout - Secondary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "gun knockout"
             
             if white_ratio >= white_threshold_secondary:
                 if red_ratio < 0.010 or white_ratio >= red_ratio * dominance_ratio_secondary:
                     if white_ratio > red_ratio * 2.2 and white_ratio > red_ratio + 0.010:
                         dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
-                        logger.info(f"✅ KNOCKED - Secondary white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
-                        return "KNOCKED"
+                        logger.info(f"✅ gun knockout - Secondary white signal (ratio: {white_ratio:.4f}, dominance: {dominance:.2f}x)")
+                        return "gun knockout"
             
             # Tertiary decision layer - with RGB validation
             if red_ratio_adjusted >= red_threshold_tertiary:
@@ -694,39 +694,39 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                     if red_ratio_adjusted > white_ratio * 1.8 and red_ratio_adjusted > white_ratio + 0.006:
                         if red_rgb_ratio > 0.06 or (red_rgb_ratio > 0.04 and red_ratio_adjusted > 0.010):
                             dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
-                            logger.info(f"✅ KILL - Tertiary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
-                            return "KILL"
+                            logger.info(f"✅ kill - Tertiary red signal (ratio: {red_ratio_adjusted:.4f}, dominance: {dominance:.2f}x)")
+                            return "kill"
             
             if white_strict_ratio >= white_threshold_tertiary:
                 if red_ratio < 0.010 or white_strict_ratio >= red_ratio * dominance_ratio_tertiary:
                     if white_strict_ratio > red_ratio * 2.0 and white_strict_ratio > red_ratio + 0.008:
                         if white_rgb_ratio > 0.05:
                             dominance = white_strict_ratio / red_ratio if red_ratio > 0 else float('inf')
-                            logger.info(f"✅ KNOCKED - Tertiary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
-                            return "KNOCKED"
+                            logger.info(f"✅ gun knockout - Tertiary white strict signal (ratio: {white_strict_ratio:.4f}, dominance: {dominance:.2f}x)")
+                            return "gun knockout"
             
             # Fallback with strict validation
             if white_strict_ratio >= 0.010 and red_ratio < 0.008:
                 if white_rgb_ratio > 0.03:
-                    logger.info(f"✅ KNOCKED - Fallback white strict (white: {white_strict_ratio:.4f}, red: {red_ratio:.4f})")
-                    return "KNOCKED"
+                    logger.info(f"✅ gun knockout - Fallback white strict (white: {white_strict_ratio:.4f}, red: {red_ratio:.4f})")
+                    return "gun knockout"
             
             if red_ratio_adjusted >= 0.010 and white_ratio < 0.010:
                 if red_rgb_ratio > 0.05:
-                    logger.info(f"✅ KILL - Fallback red (red: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
-                    return "KILL"
+                    logger.info(f"✅ kill - Fallback red (red: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
+                    return "kill"
             
-            # Final decision with bias toward KNOCKED (more common)
+            # Final decision with bias toward gun knockout (more common)
             if white_ratio > red_ratio * 1.5 and white_ratio >= 0.008:
-                logger.info(f"✅ KNOCKED - Final decision (white dominant: {white_ratio:.4f} vs {red_ratio:.4f})")
-                return "KNOCKED"
+                logger.info(f"✅ gun knockout - Final decision (white dominant: {white_ratio:.4f} vs {red_ratio:.4f})")
+                return "gun knockout"
             elif red_ratio_adjusted > white_ratio * 1.8 and red_ratio_adjusted >= 0.008:
                 if red_rgb_ratio > 0.04:
-                    logger.info(f"✅ KILL - Final decision (red dominant: {red_ratio_adjusted:.4f} vs {white_ratio:.4f})")
-                    return "KILL"
+                    logger.info(f"✅ kill - Final decision (red dominant: {red_ratio_adjusted:.4f} vs {white_ratio:.4f})")
+                    return "kill"
             else:
-                logger.warning(f"⚠️ Ambiguous - defaulting to KNOCKED (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
-                return "KNOCKED"
+                logger.warning(f"⚠️ Ambiguous - defaulting to gun knockout (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
+                return "gun knockout"
             
         except Exception as e:
             logger.error(f"⚠️ Color analysis error: {e}")
@@ -754,8 +754,8 @@ def serve(model_path="best.pt", port=50051, max_workers=10):
     servicer = KillfeedDetectionServicer(model_path=model_path)
     killfeed_detection_pb2_grpc.add_KillfeedDetectionServiceServicer_to_server(servicer, server)
     
-    # Listen on port
-    listen_addr = f'[::]:{port}'
+    # Listen on port (use 0.0.0.0 for IPv4 compatibility on Windows)
+    listen_addr = f'0.0.0.0:{port}'
     server.add_insecure_port(listen_addr)
     
     # Start server
@@ -774,26 +774,85 @@ def serve(model_path="best.pt", port=50051, max_workers=10):
         traceback.print_exc()
         sys.exit(1)
     
+    # Keep server running indefinitely until user stops it
+    # Server handles timeouts gracefully and continues processing
+    logger.info("🔄 Server loop started - will run until stopped (Ctrl+C)")
+    logger.info("💡 Server is ready to accept connections. Run your client code now.")
+    
+    # Use a robust loop that keeps the server running
+    # wait_for_termination raises FutureTimeoutError on timeout (normal) and returns None when terminated
+    consecutive_errors = 0
+    max_consecutive_errors = 100  # Only stop after 100 consecutive errors
+    
     try:
-        # Keep server running indefinitely until user stops it
-        # Server handles timeouts gracefully and continues processing
         while True:
             try:
-                server.wait_for_termination(timeout=1.0)
-                break  # Server was terminated
+                # Wait for termination with timeout
+                # This raises a timeout exception when timeout expires (normal - server still running)
+                # Returns None when server is actually terminated
+                result = server.wait_for_termination(timeout=1.0)
+                
+                # If we get here without exception, server was terminated
+                if result is None:
+                    logger.info("🛑 Server was terminated")
+                    break
+                    
+            except KeyboardInterrupt:
+                # User pressed Ctrl+C - graceful shutdown
+                logger.info("\n⏹️ User requested shutdown (Ctrl+C)")
+                logger.info("🛑 Shutting down gRPC server gracefully...")
+                try:
+                    server.stop(0)
+                    logger.info("✅ Server stopped")
+                except Exception as e:
+                    logger.error(f"⚠️ Error during shutdown: {e}")
+                break
+                
             except Exception as e:
-                # Continue running even if there are errors
-                # This ensures server keeps running through timeouts and errors
+                # Check if it's a timeout exception (normal case - server still running)
+                error_name = type(e).__name__
+                error_str = str(e).lower()
+                if 'Timeout' in error_name or 'timeout' in error_str:
+                    # Timeout is NORMAL - it means server is still running
+                    consecutive_errors = 0  # Reset error counter on successful iteration
+                    continue  # Continue the loop - server is fine
+                
+                # Not a timeout - this is an actual error
+                # Unexpected error - log but continue running
+                consecutive_errors += 1
+                logger.warning(f"⚠️ Error in server loop (error #{consecutive_errors}, continuing): {e}")
+                
+                # Only log full traceback for first few errors to avoid spam
+                if consecutive_errors <= 3:
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                
+                # If too many consecutive errors, something is seriously wrong
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error(f"❌ Too many consecutive errors ({consecutive_errors}), server may be unstable")
+                    logger.error("🛑 Stopping server due to repeated errors")
+                    try:
+                        server.stop(0)
+                    except:
+                        pass
+                    break
+                
+                # Continue running - server should not stop on errors
+                time.sleep(0.5)  # Small delay before continuing to avoid tight error loop
                 continue
+                
     except KeyboardInterrupt:
+        # Handle Ctrl+C at outer level too
         logger.info("\n⏹️ User requested shutdown (Ctrl+C)")
         logger.info("🛑 Shutting down gRPC server gracefully...")
-        server.stop(0)
-        logger.info("✅ Server stopped")
-    except Exception as e:
-        logger.error(f"❌ Unexpected error in server: {e}")
-        logger.info("🛑 Shutting down gRPC server...")
-        server.stop(0)
+        try:
+            server.stop(0)
+            logger.info("✅ Server stopped")
+        except Exception as e:
+            logger.error(f"⚠️ Error during shutdown: {e}")
+    
+    # Final cleanup
+    logger.info("🔄 Server loop ended")
 
 
 def start_server_in_background(model_path="best.pt", port=50051):
