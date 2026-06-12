@@ -43,14 +43,14 @@
     "process_alternate_frames": true
   },
   "ocr_queue": {
-    "max_size": 16,
-    "catchup_on_idle": false,
+    "max_size": 48,
+    "catchup_on_idle": true,
     "fast_row0_emit": false
   },
   "queue": {
     "max_visible_slots": 4,
     "cache_ttl_seconds": 45,
-    "pair_cooldown_seconds": 10
+    "pair_cooldown_seconds": 3
   },
   "classification": {
     "use_visual_icons_only": true,

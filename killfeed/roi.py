@@ -33,7 +33,7 @@ class StripStabilizer:
 
     alpha: float = 0.25
     max_rows: int = 4
-    merge_y_ratio: float = 0.45
+    merge_y_ratio: float = 0.62
     row_pad_y: int = 2
     row_pad_x: int = 2
     _strip_bbox: Optional[Tuple[int, int, int, int]] = None

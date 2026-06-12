@@ -96,9 +96,11 @@ def _looks_like_revive(
     if vision.is_revive_victim_text(row_crop):
         return True
 
-    # YOLO revive + green icon/crop when victim name band is unclear (OCR UNKNOWN crops)
+    # YOLO revive + green icon/crop when victim name band is unclear (OCR UNKNOWN crops).
+    # has_green_color fires at only 0.5 % green — too loose.  Use the stricter
+    # is_revive_victim_text (requires ≥12 % green) to avoid false revives.
     if yolo_class == "revive" and red_r < 0.18:
-        if icon.category == IconCategory.REVIVE or vision.has_green_color(row_crop):
+        if icon.category == IconCategory.REVIVE or vision.is_revive_victim_text(row_crop):
             return True
     return False
 

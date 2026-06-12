@@ -36,21 +36,24 @@ def _victim_color_ratios(cropped_image: np.ndarray) -> tuple[float, float, float
 
 def is_revive_victim_text(cropped_image: np.ndarray) -> bool:
     """
-    True when victim name band is green (revive text).
-    Checked before knock/kill heuristics — revive rows often have high green + low red.
+    True when victim name band is clearly green (revive text).
+    Requires a meaningful green signal so that faint badge/background noise
+    never triggers a false revive.
     """
     if cropped_image is None or cropped_image.size == 0:
         return False
     white_r, red_r, green_r = _victim_color_ratios(cropped_image)
-    # Strong kill signal overrides green badge noise
+    # Strong kill signal overrides any green badge noise
     if red_r >= 0.35 and red_r > green_r:
         return False
+    # Strong green: clearly dominates both red and white
     if green_r >= 0.15 and green_r >= red_r * 0.72 and green_r > white_r:
         return True
-    if green_r >= 0.08 and green_r > red_r and green_r > white_r * 0.35:
+    # Medium green: must clearly beat red AND white (raised from 0.08→0.12)
+    if green_r >= 0.12 and green_r > red_r * 1.5 and green_r > white_r * 0.6:
         return True
-    if green_r >= 0.02 and green_r > white_r and green_r > red_r:
-        return True
+    # Removed the ultra-loose green_r >= 0.02 condition — it caused
+    # near-white or badge-noise pixels to falsely trigger revive.
     return False
 
 

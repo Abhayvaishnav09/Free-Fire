@@ -92,6 +92,7 @@ class KillfeedPipeline:
         self._ocr_thread: Optional[Thread] = None
         self._last_strip_image: Optional[np.ndarray] = None
         self._last_row_count = 0
+        self._last_yolo_frame = 0
         self._row_ocr_cache: dict[str, tuple[str, str, float]] = {}
         self._ocr_runs_since_gc = 0
         self._stats = {
@@ -102,6 +103,7 @@ class KillfeedPipeline:
             "events_emitted": 0,
             "dup_skipped": 0,
             "gate_skips": 0,
+            "parse_skips": 0,
             "row_cache_hits": 0,
             "yolo_hits": 0,
             "yolo_misses": 0,
@@ -137,63 +139,85 @@ class KillfeedPipeline:
     def _capture_loop(self) -> None:
         last_processed_frame = 0
         while not self._stop.is_set():
-            bf = self.capture.get_latest()
-            if bf is None or bf.frame_num <= last_processed_frame:
+            snapshot = self.capture.get_ring_snapshot()
+            if not snapshot:
                 time.sleep(0.002)
                 continue
-            last_processed_frame = bf.frame_num
 
-            with self._stats_lock:
-                self._stats["frames_captured"] = bf.frame_num
-
-            roi = detect_strip(
-                bf.frame,
-                self.model,
-                kill_confidence=self.kill_confidence,
-                revive_confidence=self.revive_confidence,
-                stabilizer=self._stabilizer,
-                yolo_lock=self.yolo_lock,
-            )
-            if roi is None or roi.strip.size == 0:
-                with self._stats_lock:
-                    self._stats["yolo_misses"] += 1
-                time.sleep(0.005)
+            pending = [bf for bf in snapshot if bf.frame_num > last_processed_frame]
+            if not pending:
+                time.sleep(0.002)
                 continue
 
+            # During burst killfeeds, do not only process the latest frame — sample
+            # buffered frames so intermediate row counts are not lost.
+            if len(pending) > 1 and self._strip_queue.qsize() < max(1, self.ocr_queue_max - 2):
+                step = max(1, len(pending) // 4)
+                to_process = pending[::step][-4:]
+            else:
+                to_process = [pending[-1]]
+
+            for bf in to_process:
+                if bf.frame_num <= last_processed_frame:
+                    continue
+                last_processed_frame = bf.frame_num
+                self._process_capture_frame(bf)
+
+    def _process_capture_frame(self, bf) -> None:
+        with self._stats_lock:
+            self._stats["frames_captured"] = bf.frame_num
+
+        roi = detect_strip(
+            bf.frame,
+            self.model,
+            kill_confidence=self.kill_confidence,
+            revive_confidence=self.revive_confidence,
+            stabilizer=self._stabilizer,
+            yolo_lock=self.yolo_lock,
+        )
+        if roi is None or roi.strip.size == 0:
             with self._stats_lock:
-                self._stats["yolo_hits"] += 1
+                self._stats["yolo_misses"] += 1
+            return
 
-            row_count = len(roi.rows)
-            changed, new_dhash = strip_changed(
-                roi.strip, self.state.last_strip_dhash, max_distance=self.dhash_max_distance
+        with self._stats_lock:
+            self._stats["yolo_hits"] += 1
+
+        row_count = len(roi.rows)
+        changed, new_dhash = strip_changed(
+            roi.strip, self.state.last_strip_dhash, max_distance=self.dhash_max_distance
+        )
+        mean_diff = 999.0
+        if self._last_strip_image is not None:
+            mean_diff = pixel_mean_diff(roi.strip, self._last_strip_image)
+
+        row_count_increased = row_count > self._last_row_count
+        should_queue = (
+            self.state.last_strip_dhash is None
+            or changed
+            or mean_diff >= self.roi_change_threshold
+            or row_count != self._last_row_count
+            or row_count_increased
+            or (bf.frame_num - self._last_yolo_frame) >= 8
+        )
+
+        if not should_queue:
+            with self._stats_lock:
+                self._stats["gate_skips"] += 1
+            return
+
+        self._last_row_count = row_count
+        self._last_yolo_frame = bf.frame_num
+        self.state.last_strip_dhash = new_dhash
+        self._last_strip_image = roi.strip.copy()
+        self._enqueue_strip(
+            StripJob(
+                strip=roi.strip.copy(),
+                roi=roi,
+                frame_num=bf.frame_num,
+                timestamp=bf.timestamp,
             )
-            mean_diff = 999.0
-            if self._last_strip_image is not None:
-                mean_diff = pixel_mean_diff(roi.strip, self._last_strip_image)
-
-            should_queue = (
-                self.state.last_strip_dhash is None
-                or changed
-                or mean_diff >= self.roi_change_threshold
-                or row_count != self._last_row_count
-            )
-
-            if not should_queue:
-                with self._stats_lock:
-                    self._stats["gate_skips"] += 1
-                continue
-
-            self._last_row_count = row_count
-            self.state.last_strip_dhash = new_dhash
-            self._last_strip_image = roi.strip.copy()
-            self._enqueue_strip(
-                StripJob(
-                    strip=roi.strip.copy(),
-                    roi=roi,
-                    frame_num=bf.frame_num,
-                    timestamp=bf.timestamp,
-                )
-            )
+        )
 
     def _enqueue_strip(self, job: StripJob) -> None:
         while not self._stop.is_set():
@@ -204,9 +228,18 @@ class KillfeedPipeline:
                 return
             except Full:
                 try:
-                    self._strip_queue.get_nowait()
+                    dropped = self._strip_queue.get_nowait()
                     with self._stats_lock:
                         self._stats["strips_dropped"] += 1
+                    dropped_rows = len(getattr(dropped.roi, "rows", []) or [])
+                    new_rows = len(getattr(job.roi, "rows", []) or [])
+                    if new_rows >= dropped_rows:
+                        continue  # discard older/smaller snapshot, retry enqueue
+                    try:
+                        self._strip_queue.put_nowait(dropped)
+                    except Full:
+                        pass
+                    return  # incoming snapshot has fewer rows — drop it
                 except Empty:
                     pass
 
@@ -331,14 +364,21 @@ class KillfeedPipeline:
                 return
 
             parsed_rows: list[ParsedRow] = []
-            for i, row in enumerate(job.roi.rows):
-                pr = self._parse_row_cached(row, i)
+            # Row 0 first — newest killfeed at top of strip
+            row_order = [0] + [i for i in range(len(job.roi.rows)) if i != 0]
+            for i in row_order:
+                pr = self._parse_row_cached(job.roi.rows[i], i)
                 if pr is not None:
                     parsed_rows.append(pr)
 
             if not parsed_rows:
+                with self._stats_lock:
+                    self._stats["parse_skips"] += 1
                 self._maybe_gc()
                 return
+
+            # Keep top→bottom order for FIFO diff
+            parsed_rows.sort(key=lambda r: r.position)
 
             new_sigs = self.state.diff_and_commit(signatures_from_rows(parsed_rows))
             if not new_sigs:

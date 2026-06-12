@@ -115,19 +115,25 @@ def find_new_slots(
         ):
             return [current[0]]
 
+    # Top row unchanged but more rows visible — new killfeeds below (burst / YOLO lag).
     if _pair_fuzzy_equal(current[0], previous[0], fuzzy_threshold):
-        return []
+        if len(current) <= len(previous):
+            return []
+    else:
+        for i in range(len(current)):
+            tail = current[i:]
+            prev_slice = previous[: len(tail)]
+            if len(prev_slice) == len(tail) and _lists_fuzzy_equal(
+                tail, prev_slice, fuzzy_threshold
+            ):
+                return list(current[:i])
 
-    for i in range(len(current)):
-        tail = current[i:]
-        prev_slice = previous[: len(tail)]
-        if _lists_fuzzy_equal(tail, prev_slice, fuzzy_threshold):
-            new = current[:i]
-            return [new[0]] if new else []
-
-    if not any(_pair_fuzzy_equal(current[0], p, fuzzy_threshold) for p in previous):
-        return [current[0]]
-    return []
+    # Alignment failed (OCR noise, rows dropped) — emit every row not in previous snapshot.
+    unmatched: List[str] = []
+    for sig in current:
+        if not any(_pair_fuzzy_equal(sig, p, fuzzy_threshold) for p in previous):
+            unmatched.append(sig)
+    return unmatched
 
 
 class TTLDetectedCache:
@@ -152,6 +158,56 @@ class TTLDetectedCache:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+
+def _killer_ocr_similar(a: str, b: str, threshold: float = 78.0) -> bool:
+    """Same real player read differently by OCR."""
+    if _fuzzy_equal(a, b, threshold):
+        return True
+    if not a or not b:
+        return False
+    if RAPIDFUZZ_AVAILABLE:
+        au, bu = a.upper(), b.upper()
+        if fuzz.partial_ratio(au, bu) >= 80:
+            return True
+        sa = au.split(".")[-1] if "." in au else au
+        sb = bu.split(".")[-1] if "." in bu else bu
+        if len(sa) >= 4 and len(sb) >= 4 and fuzz.ratio(sa, sb) >= 82:
+            return True
+    return False
+
+
+class VictimEventCooldown:
+    """Block OCR-noise duplicates: same victim+event, killer string varies slightly."""
+
+    def __init__(self, ttl_seconds: float = 4.0, killer_fuzzy: float = 78.0):
+        self.ttl_seconds = ttl_seconds
+        self.killer_fuzzy = killer_fuzzy
+        self._entries: dict[str, tuple[str, float]] = {}
+
+    def _key(self, victim: str, canonical: str) -> str:
+        return f"{(victim or '').upper()}|{canonical}"
+
+    def _prune(self, now: float) -> None:
+        cutoff = now - self.ttl_seconds
+        self._entries = {k: v for k, v in self._entries.items() if v[1] >= cutoff}
+
+    def allows(self, killer: str, victim: str, canonical: str) -> bool:
+        now = time.time()
+        self._prune(now)
+        key = self._key(victim, canonical)
+        prev = self._entries.get(key)
+        if prev is None:
+            return True
+        last_killer, ts = prev
+        if (now - ts) >= self.ttl_seconds:
+            return True
+        if _killer_ocr_similar(killer, last_killer, self.killer_fuzzy):
+            return False
+        return True
+
+    def mark(self, killer: str, victim: str, canonical: str) -> None:
+        self._entries[self._key(victim, canonical)] = (killer, time.time())
 
 
 class PairCooldown:
@@ -206,6 +262,7 @@ class KillfeedState:
         self.previous_snapshot: List[str] = []
         self.detected_cache = TTLDetectedCache(ttl_seconds=cache_ttl_seconds)
         self.pair_cooldown = PairCooldown(ttl_seconds=pair_cooldown_seconds)
+        self.victim_cooldown = VictimEventCooldown(ttl_seconds=min(pair_cooldown_seconds, 4.0))
         self.last_strip_dhash: Optional[str] = None
         self.sequence = 0
 
@@ -227,6 +284,8 @@ class KillfeedState:
     def should_emit(self, killer: str, victim: str, canonical: str, event_hash: str) -> bool:
         if self.detected_cache.contains(event_hash):
             return False
+        if not self.victim_cooldown.allows(killer, victim, canonical):
+            return False
         if not self.pair_cooldown.allows(killer, victim, canonical):
             return False
         return True
@@ -234,4 +293,5 @@ class KillfeedState:
     def mark_emitted(self, killer: str, victim: str, canonical: str, event_hash: str) -> None:
         self.detected_cache.add(event_hash)
         self.pair_cooldown.mark(killer, victim, canonical)
+        self.victim_cooldown.mark(killer, victim, canonical)
         self.sequence += 1

@@ -42,7 +42,13 @@ def extract_icon_roi(row_crop: np.ndarray) -> np.ndarray:
 
 def analyze_icon(row_crop: np.ndarray) -> IconAnalysis:
     """
-    Visual-only icon classification on ~48x24 resized ROI (<2ms typical).
+    Visual-only icon classification on In vision.py, I should remove the overly permissive 2% green condition entirely.
+
+I'm also noticing the gun detection logic needs tightening — with such a low red threshold, any weapon icon with slight background contamination gets misclassified as a headshot. I need to increase that red requirement significantly and ensure it's actually dominant over other colors.
+
+For the revive victim detection, I'm removing the overly permissive condition and keeping only the stricter checks that require green to be substantially more prominent than red and white. I'll also need to review the revive detection logic in the classifier to make sure it's consistent.
+
+~48x24 resized ROI (<2ms typical).
     Never reads OCR text.
     """
     roi = extract_icon_roi(row_crop)
@@ -78,10 +84,17 @@ def analyze_icon(row_crop: np.ndarray) -> IconAnalysis:
     white_r = cv2.countNonZero(white) / total
 
     has_gun = edge_ratio >= 0.08 and white_r >= 0.05 and roi_aspect >= 1.2
-    has_headshot = red_r >= 0.02 and red_r > orange_r
+    # Raised from 0.02 → 0.12 to avoid false headshot from badge/background bleed.
+    # Also require red to clearly dominate orange and not be swamped by white.
+    has_headshot = (
+        red_r >= 0.12
+        and red_r > orange_r * 1.5
+        and red_r > white_r * 0.25
+    )
 
-    # Revive icon is green — must not also flag gun silhouette
-    if green_r >= 0.04 and green_r > red_r:
+    # Revive icon is green — raised threshold from 0.04 → 0.14 and require
+    # green to be at least 2× red so that faint badge noise never triggers revive.
+    if green_r >= 0.14 and green_r > red_r * 2.0:
         return IconAnalysis(IconCategory.REVIVE, 0.7, False, has_headshot)
 
     if (yellow_r + orange_r) >= 0.06 and not has_gun and edge_ratio < 0.07:

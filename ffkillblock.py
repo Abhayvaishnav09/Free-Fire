@@ -315,6 +315,7 @@ class KillblockDetector:
         elif self.api_push_enabled:
             print(f"🌐 TMS killfeed API enabled: {self.api_url}")
             self._verify_tms_api()
+            self._verify_match_active()
         
         # Detection tracking
         self.detection_sequence = 0
@@ -388,7 +389,7 @@ class KillblockDetector:
         # Thread pool for parallel processing
         # Reduced OCR workers to 1 because PaddleOCR is not fully thread-safe
         self.ocr_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="OCR")
-        self.api_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="API")
+        self.api_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="API")
         
         # OCR lock for thread safety (PaddleOCR is not thread-safe)
         self.ocr_lock = Lock()
@@ -1133,6 +1134,50 @@ class KillblockDetector:
         except Exception as e:
             print(f"⚠️ TMS API check failed: {type(e).__name__}")
 
+    def _parse_api_error_message(self, response) -> str:
+        """Extract human-readable error from TMS JSON response."""
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                msg = body.get("message") or body.get("error", {}).get("detail")
+                if msg:
+                    return str(msg)
+        except Exception:
+            pass
+        return (getattr(response, "text", None) or "")[:200]
+
+    def _verify_match_active(self):
+        """Warn if TMS match is completed — killfeed POST will be rejected with HTTP 400."""
+        if not self.api_push_enabled or not self.match_id:
+            return
+        try:
+            app_config = _load_app_config()
+            backend = _backend_url_from_config()
+            ep = app_config.get("endpoints", {}).get(
+                "match_states", "api/LeagueMatch/getMatchStates/details"
+            )
+            url = f"{backend}/{ep.lstrip('/')}?matchId={self.match_id}"
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            response = self.api_session.get(url, headers=headers, timeout=8)
+            if response.status_code != 200:
+                print(f"⚠️ Could not verify match status (HTTP {response.status_code})")
+                return
+            data = response.json()
+            details = (data.get("data") or {}).get("matchDetails") or {}
+            status = (details.get("status") or "").strip()
+            name = details.get("name") or self.match_id
+            if status.lower() in ("completed", "complete", "finished", "ended"):
+                print(f"❌ TMS match is '{status}' — killfeed API will reject all posts (HTTP 400)")
+                print(f"   Match: {name} ({self.match_id})")
+                print("   Fix: In TMS panel set match to Live/In Progress, OR update match_id in local_config.json")
+                self.api_push_enabled = False
+            elif status:
+                print(f"✅ TMS match status: {status} ({name})")
+        except requests.exceptions.Timeout:
+            print("⚠️ Match status check timed out — continuing anyway")
+        except Exception as e:
+            print(f"⚠️ Match status check failed: {type(e).__name__}")
+
     def _load_tms_players_list(self):
         """Load active TMS players list from API for fuzzy matching."""
         if not self.api_enabled or not self.access_token or not self.match_id:
@@ -1718,7 +1763,9 @@ class KillblockDetector:
         safe_victim = self._sanitize_filename_part(victim_name)
         filename = f"{sequence_number:03d}_{safe_killer}_{status_label}_{safe_victim}.png"
 
-        skip_api_duplicate = self._is_name_cooldown_duplicate(killer_name, victim_name, status)
+        skip_api_duplicate = False
+        if not skip_api_push:
+            skip_api_duplicate = self._is_name_cooldown_duplicate(killer_name, victim_name, status)
 
         # Push to TMS immediately from memory — don't wait for disk save
         if (
@@ -1768,22 +1815,25 @@ class KillblockDetector:
         return True
     
     def _queue_tms_push(self, victim_name, killer_name, status, cropped_image, sequence_number):
-        """Fire TMS API immediately in background — uses in-memory JPEG, skips disk read."""
+        """Queue TMS API in strict sequence order — one request at a time."""
         if not self.api_push_enabled:
             return
         image_copy = cropped_image.copy() if cropped_image is not None else None
         try:
-            self.api_executor.submit(
-                self._send_to_api_with_retry,
-                player_name=victim_name,
-                enemy_name=killer_name,
-                status=status,
-                image_path=None,
-                sequence_number=sequence_number,
-                image_array=image_copy,
+            self.api_queue.put_nowait(
+                {
+                    "player_name": victim_name,
+                    "enemy_name": killer_name,
+                    "status": status,
+                    "image_path": None,
+                    "sequence_number": sequence_number,
+                    "image_array": image_copy,
+                }
             )
+        except Full:
+            print(f"⚠️ API queue full — could not queue killfeed #{sequence_number}")
         except Exception as e:
-            print(f"⚠️ TMS push submit failed: {type(e).__name__}")
+            print(f"⚠️ TMS push queue failed: {type(e).__name__}")
     
     def _send_to_api(self, player_name, enemy_name, status, image_path, sequence_number):
         """
@@ -2056,6 +2106,7 @@ class KillblockDetector:
                         f"| OCR={st.get('ocr_runs', 0)} "
                         f"| emitted={st.get('events_emitted', 0)} "
                         f"| dup_skip={st.get('dup_skipped', 0)} "
+                        f"| dropped={st.get('strips_dropped', 0)} "
                         f"| gate_skips={st.get('gate_skips', 0)} "
                         f"| dropped={st.get('strips_dropped', 0)}"
                     )
@@ -2335,12 +2386,11 @@ class KillblockDetector:
                 except Empty:
                     continue
                 
-                # Send API request asynchronously
+                # Send in strict sequence — wait for each request before next
                 try:
-                    future = self.api_executor.submit(self._send_to_api_with_retry, **api_request)
-                    # Don't wait - let it send in background
+                    self._send_to_api_with_retry(**api_request)
                     self.api_queue.task_done()
-                    error_count = 0  # Reset error count on success
+                    error_count = 0
                 except Exception as e:
                     # Even if submission fails, mark task as done to prevent queue blocking
                     try:
@@ -2529,7 +2579,13 @@ class KillblockDetector:
                             self.stats['api_retries'] += 1
                         continue
                     else:
-                        print(f"⚠️ API: Request failed (Status: {response.status_code}) after {max_retries} attempts")
+                        detail = self._parse_api_error_message(response)
+                        print(
+                            f"⚠️ API: Request failed (Status: {response.status_code}) "
+                            f"after {max_retries} attempts"
+                        )
+                        if detail:
+                            print(f"   TMS says: {detail}")
                         with self.stats_lock:
                             self.stats['api_failed'] += 1
                         return False
