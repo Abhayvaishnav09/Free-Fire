@@ -30,10 +30,10 @@ desktop.ini
 *.pt  # YOLO model files (usually large - exclude from git)
 best_*.pt  # Alternative model files
 
-# Generated outputs (cropkillblock images)
-cropkillblock/*.png
-cropkillblock/*.jpg
-sessions/
+# Generated outputs (cropkillblock images) — tracked on dev-ff-ai-1
+# cropkillblock/*.png
+# cropkillblock/*.jpg
+# sessions/
 
 # Screenshot images
 Screenshot*.png
@@ -42,7 +42,7 @@ Screenshot*.png
 *.tmp
 *.temp
 *.log
-local_config.json
+# local_config.json — tracked on dev-ff-ai-1
 
 # PaddleOCR cache (if any)
 .paddleocr/
