@@ -33,6 +33,7 @@ best_*.pt  # Alternative model files
 # Generated outputs (cropkillblock images)
 cropkillblock/*.png
 cropkillblock/*.jpg
+sessions/
 
 # Screenshot images
 Screenshot*.png
@@ -41,6 +42,7 @@ Screenshot*.png
 *.tmp
 *.temp
 *.log
+local_config.json
 
 # PaddleOCR cache (if any)
 .paddleocr/

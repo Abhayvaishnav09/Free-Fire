@@ -8,6 +8,7 @@ import threading
 import time
 import subprocess
 import sys
+import gc
 from concurrent import futures
 import grpc
 from ultralytics import YOLO
@@ -78,10 +79,16 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             ProcessFrameResponse with detection results
         """
         start_time = time.time()
+        frame = None
+        frame_array = None
         try:
             # Decode image from bytes
             frame_array = np.frombuffer(request.frame_image, dtype=np.uint8)
             frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
+            
+            # Explicitly delete the frame_array to free memory immediately
+            del frame_array
+            gc.collect()
             
             if frame is None or frame.size == 0:
                 logger.warning("⚠️ Failed to decode frame image")
@@ -94,17 +101,46 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             logger.debug(f"🔄 Processing frame (size: {frame.shape})...")
             detections = self._process_frame(frame)
             
+            # Explicitly delete frame after processing to free memory
+            del frame
+            gc.collect()
+            
             # Build response
             response = killfeed_detection_pb2.ProcessFrameResponse(
                 success=True,
                 detections=[]
             )
             
+            # Limit maximum number of detections to prevent huge responses
+            max_detections = 10
+            detections = detections[:max_detections]
+            
+            total_response_size = 0
+            max_response_size = 40 * 1024 * 1024  # 40MB limit (below 50MB gRPC limit)
+            
             for detection in detections:
                 try:
-                    # Encode cropped image to bytes
-                    _, cropped_encoded = cv2.imencode('.png', detection['cropped_image'])
+                    cropped_image = detection['cropped_image']
+                    
+                    # Resize large cropped images to reduce memory usage
+                    max_crop_size = 800  # Maximum dimension for cropped images
+                    h, w = cropped_image.shape[:2]
+                    if max(h, w) > max_crop_size:
+                        scale = max_crop_size / max(h, w)
+                        new_w = int(w * scale)
+                        new_h = int(h * scale)
+                        cropped_image = cv2.resize(cropped_image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    
+                    # Encode cropped image to JPEG bytes (much smaller than PNG)
+                    # Use quality 85 for good balance between size and quality
+                    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 85]
+                    _, cropped_encoded = cv2.imencode('.jpg', cropped_image, encode_params)
                     cropped_bytes = cropped_encoded.tobytes()
+                    
+                    # Check if adding this detection would exceed size limit
+                    if total_response_size + len(cropped_bytes) > max_response_size:
+                        logger.warning(f"⚠️ Response size limit reached, truncating detections at {len(response.detections)}")
+                        break
                     
                     # Create bounding box
                     bbox = killfeed_detection_pb2.BoundingBox(
@@ -124,19 +160,50 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                     )
                     
                     response.detections.append(result)
+                    total_response_size += len(cropped_bytes)
+                    
+                    # Explicitly delete intermediate variables to free memory
+                    del cropped_image, cropped_encoded, cropped_bytes
+                    
+                except MemoryError as me:
+                    logger.error(f"❌ MemoryError encoding detection result: {me}, stopping...")
+                    break
                 except Exception as e:
                     logger.warning(f"⚠️ Error encoding detection result: {e}, skipping...")
                     continue
+            
+            # Force garbage collection before returning response
+            gc.collect()
             
             processing_time = time.time() - start_time
             logger.info(f"✅ Processed frame: {len(response.detections)} detections in {processing_time:.2f}s")
             return response
             
+        except MemoryError as me:
+            # Handle MemoryError specifically
+            logger.error(f"❌ MemoryError processing frame: {me}")
+            # Clean up any remaining references
+            if frame is not None:
+                del frame
+            if frame_array is not None:
+                del frame_array
+            gc.collect()
+            # Return error response but server keeps running
+            return killfeed_detection_pb2.ProcessFrameResponse(
+                success=False,
+                error_message=f"Memory error processing frame: {str(me)}"
+            )
         except Exception as e:
             # Log error but don't crash - server continues running
             logger.error(f"❌ Error processing frame: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            # Clean up any remaining references
+            if frame is not None:
+                del frame
+            if frame_array is not None:
+                del frame_array
+            gc.collect()
             # Return error response but server keeps running
             return killfeed_detection_pb2.ProcessFrameResponse(
                 success=False,
@@ -154,7 +221,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
         Returns:
             list: List of detection results, each containing:
                 - 'cropped_image': Cropped killfeed image
-                - 'status': Status (gun knockout/kill/revived)
+                - 'status': Status (gun knockout/kill/revive)
                 - 'bbox': Bounding box coordinates [x1, y1, x2, y2]
                 - 'confidence': Detection confidence
                 - 'detection_sources': List of detection sources for REVIVED
@@ -267,37 +334,68 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
     
     def _determine_status(self, full_frame, cropped_image):
         """
-        Determine the status of a killfeed (KNOCKED/KILL/REVIVED).
+        Determine the status of a killfeed (KNOCKED/KILL/REVIVE).
         
         Returns:
             tuple: (status, detection_sources)
-                - status: "KNOCKED", "KILL", or "REVIVED"
-                - detection_sources: List of sources that detected revived (empty for gun knockout/kill)
+                - status: "KNOCKED", "KILL", or "REVIVE"
+                - detection_sources: List of sources that detected revive (empty for gun knockout/kill)
         """
-        # Check for revived first (highest priority)
-        revive_in_crop = self._detect_revive_status(cropped_image)
-        revive_in_frame = self._detect_revive_in_frame(full_frame)
+        # First, get color analysis to cross-validate revive detection
+        color_status = self._analyze_victim_color(cropped_image)
+        color_analysis = self._get_detailed_color_analysis(cropped_image)
         
-        detection_sources = []
-        revive_confidence_score = 0.0
+        # PRIORITY: If color analysis strongly indicates KILL, prioritize it over revive
+        red_ratio = color_analysis.get('red_ratio', 0.0)
+        white_ratio = color_analysis.get('white_ratio', 0.0)
         
-        if revive_in_crop:
-            detection_sources.append("YOLO killblock crop")
-            revive_confidence_score += 0.4
+        # Strong kill detection - immediately reject revive and return kill
+        if color_status == "kill":
+            # Additional validation: ensure red signal is strong enough
+            # Lower threshold to catch more kill cases (0.008 instead of 0.015)
+            if red_ratio >= 0.008 and white_ratio < 0.010:
+                logger.info(f"✅ STATUS: kill (strong red signal detected, red: {red_ratio:.4f}, white: {white_ratio:.4f}) - revive rejected")
+                return "kill", []
         
-        if revive_in_frame:
-            detection_sources.append("YOLO full frame")
-            revive_confidence_score += 0.3
+        # Check for revive with enhanced validation
+        revive_result = self._detect_revive_with_validation(cropped_image, full_frame, color_analysis)
         
-        # revived takes absolute priority
-        if detection_sources and revive_confidence_score >= 0.3:
-            status = "revived"
-            logger.info(f"✅ STATUS: revived (detected via {' + '.join(detection_sources)}, confidence: {revive_confidence_score:.2f})")
-            return status, detection_sources
+        if revive_result['is_revive']:
+            # Cross-validate: if color strongly suggests knocked/kill, reject revive
+            if color_status in ["gun knockout", "kill"]:
+                # Check if color signals are strong enough to override revive
+                # STRONGER thresholds for kill - be more aggressive
+                
+                # For KILL: Lower threshold to catch more red signals
+                if color_status == "kill":
+                    # Any red signal above 0.008 with low white should reject revive
+                    if red_ratio >= 0.008 and white_ratio < 0.010:
+                        logger.warning(f"⚠️ Revive rejected - kill detected (red: {red_ratio:.4f}, white: {white_ratio:.4f})")
+                        # Fall through to color-based detection
+                    else:
+                        # Revive confirmed with validation
+                        status = "revive"
+                        logger.info(f"✅ STATUS: revive (detected via {' + '.join(revive_result['sources'])}, confidence: {revive_result['confidence']:.2f}, validated: {revive_result['validation_passed']})")
+                        return status, revive_result['sources']
+                else:
+                    # For gun knockout: existing logic
+                    if (white_ratio > 0.020 and red_ratio < 0.005) or (red_ratio > 0.015 and white_ratio < 0.005):
+                        logger.warning(f"⚠️ Revive rejected - strong color signal detected (white: {white_ratio:.4f}, red: {red_ratio:.4f})")
+                        # Fall through to color-based detection
+                    else:
+                        # Revive confirmed with validation
+                        status = "revive"
+                        logger.info(f"✅ STATUS: revive (detected via {' + '.join(revive_result['sources'])}, confidence: {revive_result['confidence']:.2f}, validated: {revive_result['validation_passed']})")
+                        return status, revive_result['sources']
+            else:
+                # Revive confirmed (no conflicting color signal)
+                status = "revive"
+                logger.info(f"✅ STATUS: revive (detected via {' + '.join(revive_result['sources'])}, confidence: {revive_result['confidence']:.2f}, validated: {revive_result['validation_passed']})")
+                return status, revive_result['sources']
         
-        # If not revived, analyze color for gun knockout/kill
-        logger.debug("🔍 No revived detected, checking color for gun knockout/kill...")
-        status = self._analyze_victim_color(cropped_image)
+        # If not revive, analyze color for gun knockout/kill
+        logger.debug("🔍 No revive detected, checking color for gun knockout/kill...")
+        status = color_status
         
         if status not in ["gun knockout", "kill", "UNKNOWN"]:
             logger.warning(f"⚠️ Invalid status '{status}', defaulting to gun knockout")
@@ -313,84 +411,292 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
         
         return status, []
     
+    def _get_detailed_color_analysis(self, cropped_image):
+        """Get detailed color analysis metrics for cross-validation."""
+        try:
+            if cropped_image is None or cropped_image.size == 0:
+                return {'white_ratio': 0.0, 'red_ratio': 0.0, 'green_ratio': 0.0}
+            
+            text_region = self._extract_victim_text_region(cropped_image)
+            if text_region is None:
+                return {'white_ratio': 0.0, 'red_ratio': 0.0, 'green_ratio': 0.0}
+            
+            text_region = self._preprocess_text_region(text_region)
+            total_pixels = text_region.shape[0] * text_region.shape[1]
+            if total_pixels == 0:
+                return {'white_ratio': 0.0, 'red_ratio': 0.0, 'green_ratio': 0.0}
+            
+            hsv_image = cv2.cvtColor(text_region, cv2.COLOR_BGR2HSV)
+            
+            # Red detection
+            lower_red1 = np.array([0, 55, 65])
+            upper_red1 = np.array([15, 255, 255])
+            lower_red2 = np.array([165, 55, 65])
+            upper_red2 = np.array([180, 255, 255])
+            mask_red1 = cv2.inRange(hsv_image, lower_red1, upper_red1)
+            mask_red2 = cv2.inRange(hsv_image, lower_red2, upper_red2)
+            mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+            
+            # White detection
+            lower_white = np.array([0, 0, 200])
+            upper_white = np.array([180, 18, 255])
+            mask_white = cv2.inRange(hsv_image, lower_white, upper_white)
+            
+            # Green detection (for revive indicators)
+            lower_green = np.array([40, 50, 50])
+            upper_green = np.array([80, 255, 255])
+            mask_green = cv2.inRange(hsv_image, lower_green, upper_green)
+            
+            red_pixels = cv2.countNonZero(mask_red)
+            white_pixels = cv2.countNonZero(mask_white)
+            green_pixels = cv2.countNonZero(mask_green)
+            
+            red_ratio = red_pixels / total_pixels if total_pixels > 0 else 0.0
+            white_ratio = white_pixels / total_pixels if total_pixels > 0 else 0.0
+            green_ratio = green_pixels / total_pixels if total_pixels > 0 else 0.0
+            
+            return {
+                'white_ratio': white_ratio,
+                'red_ratio': red_ratio,
+                'green_ratio': green_ratio
+            }
+        except Exception as e:
+            logger.debug(f"⚠️ Color analysis error: {e}")
+            return {'white_ratio': 0.0, 'red_ratio': 0.0, 'green_ratio': 0.0}
+    
+    def _detect_green_indicators(self, cropped_image):
+        """Detect green color indicators that are common in revive killfeeds."""
+        try:
+            if cropped_image is None or cropped_image.size == 0:
+                return False
+            
+            height, width = cropped_image.shape[:2]
+            if height < 10 or width < 10:
+                return False
+            
+            # Check multiple regions for green indicators
+            hsv_image = cv2.cvtColor(cropped_image, cv2.COLOR_BGR2HSV)
+            
+            # Green color range (broader for revive indicators)
+            lower_green1 = np.array([40, 40, 40])
+            upper_green1 = np.array([85, 255, 255])
+            mask_green = cv2.inRange(hsv_image, lower_green1, upper_green1)
+            
+            # Also check for bright green (common in revive icons)
+            lower_green2 = np.array([50, 100, 100])
+            upper_green2 = np.array([75, 255, 255])
+            mask_green_bright = cv2.inRange(hsv_image, lower_green2, upper_green2)
+            
+            mask_combined = cv2.bitwise_or(mask_green, mask_green_bright)
+            green_pixels = cv2.countNonZero(mask_combined)
+            total_pixels = height * width
+            green_ratio = green_pixels / total_pixels if total_pixels > 0 else 0.0
+            
+            # Revive killfeeds typically have some green indicators
+            # Threshold is lower because green might be in icons, not text
+            return green_ratio >= 0.005  # At least 0.5% green pixels
+        except Exception as e:
+            logger.debug(f"⚠️ Green detection error: {e}")
+            return False
+    
+    def _validate_revive_spatial(self, cropped_image, revive_detections):
+        """Validate that revive detections are in appropriate spatial locations."""
+        try:
+            if not revive_detections or cropped_image is None:
+                return False
+            
+            height, width = cropped_image.shape[:2]
+            if height < 30 or width < 30:
+                return False
+            
+            # Revive indicators are typically in specific regions
+            # Check if detections are in reasonable locations (not edge cases)
+            valid_count = 0
+            for detection in revive_detections:
+                # If we have bbox info, validate it
+                # For now, just check if we have multiple detections
+                valid_count += 1
+            
+            # Require at least one valid detection
+            return valid_count > 0
+        except Exception as e:
+            logger.debug(f"⚠️ Spatial validation error: {e}")
+            return False
+    
+    def _detect_revive_with_validation(self, cropped_image, full_frame, color_analysis):
+        """
+        Enhanced revive detection with multiple validation layers.
+        
+        Returns:
+            dict: {
+                'is_revive': bool,
+                'sources': list,
+                'confidence': float,
+                'validation_passed': bool
+            }
+        """
+        result = {
+            'is_revive': False,
+            'sources': [],
+            'confidence': 0.0,
+            'validation_passed': False
+        }
+        
+        # Step 1: YOLO-based detection with higher confidence threshold
+        revive_in_crop = self._process_yolo_revive_detection(cropped_image, min_confidence=0.15)
+        revive_in_frame = self._process_yolo_revive_detection(full_frame, min_confidence=0.15, resize_to=(1280, 720))
+        
+        # Step 2: Collect detection sources
+        if revive_in_crop:
+            result['sources'].append("YOLO killblock crop")
+            result['confidence'] += 0.5  # Increased weight
+        
+        if revive_in_frame:
+            result['sources'].append("YOLO full frame")
+            result['confidence'] += 0.4  # Increased weight
+        
+        # Step 3: Require stronger evidence (at least one detection with higher confidence)
+        if not result['sources']:
+            return result
+        
+        # Step 4: Color-based validation - STRONGER for kill detection
+        white_ratio = color_analysis.get('white_ratio', 0.0)
+        red_ratio = color_analysis.get('red_ratio', 0.0)
+        green_ratio = color_analysis.get('green_ratio', 0.0)
+        
+        # Validation 1: Should NOT have strong white/red signals (those indicate knocked/kill)
+        # STRONGER thresholds - be more sensitive to red (kill) signals
+        has_strong_white = white_ratio > 0.015 and red_ratio < 0.003
+        # LOWER threshold for red to catch more kill cases (0.008 instead of 0.012)
+        has_strong_red = red_ratio > 0.008 and white_ratio < 0.008
+        
+        if has_strong_white or has_strong_red:
+            logger.debug(f"⚠️ Revive validation failed - strong color signal (white: {white_ratio:.4f}, red: {red_ratio:.4f})")
+            return result  # Reject revive
+        
+        # Additional check: if red is present and dominant, reject revive
+        if red_ratio >= 0.010 and red_ratio > white_ratio * 1.5:
+            logger.debug(f"⚠️ Revive validation failed - red dominant (red: {red_ratio:.4f}, white: {white_ratio:.4f})")
+            return result  # Reject revive
+        
+        # Validation 2: Green indicators support revive (optional but helpful)
+        green_detected = self._detect_green_indicators(cropped_image)
+        if green_detected:
+            result['confidence'] += 0.2
+            result['sources'].append("Green indicators")
+            logger.debug(f"✅ Green indicators detected (ratio: {green_ratio:.4f})")
+        
+        # Validation 3: Require minimum confidence threshold
+        min_confidence_required = 0.6  # Increased from 0.3
+        if result['confidence'] < min_confidence_required:
+            logger.debug(f"⚠️ Revive validation failed - insufficient confidence ({result['confidence']:.2f} < {min_confidence_required})")
+            return result
+        
+        # Validation 4: Require multiple sources for lower confidence detections
+        if len(result['sources']) < 2 and result['confidence'] < 0.8:
+            logger.debug(f"⚠️ Revive validation failed - need multiple sources (sources: {len(result['sources'])}, confidence: {result['confidence']:.2f})")
+            return result
+        
+        # All validations passed
+        result['is_revive'] = True
+        result['validation_passed'] = True
+        
+        return result
+    
     def _is_revive_class(self, class_name):
         """Check if class name indicates revive status."""
         if not class_name:
             return False
         class_name_lower = class_name.lower()
-        return (class_name_lower in ["revive", "revived", "revive_icon", "reviveicon"] or
+        return (class_name_lower in ["revive", "revive_icon", "reviveicon"] or
                 "revive" in class_name_lower or
                 class_name_lower.startswith("revive") or
                 class_name_lower.endswith("revive"))
     
-    def _validate_revive_detections(self, revive_detections, context=""):
-        """Validate revive detections with enhanced adaptive confidence thresholds."""
+    def _validate_revive_detections(self, revive_detections, context="", min_confidence=0.15):
+        """
+        Validate revive detections with enhanced adaptive confidence thresholds.
+        Stricter thresholds to reduce false positives.
+        
+        Args:
+            revive_detections: List of (class_name, confidence) tuples
+            context: Context string for logging
+            min_confidence: Minimum confidence threshold (default 0.15, stricter than before)
+        
+        Returns:
+            bool: True if revive is validated, False otherwise
+        """
         if not revive_detections:
             return False
         
-        best_revive = max(revive_detections, key=lambda x: x[1])
+        # Filter by minimum confidence first
+        filtered_detections = [d for d in revive_detections if d[1] >= min_confidence]
+        if not filtered_detections:
+            return False
+        
+        best_revive = max(filtered_detections, key=lambda x: x[1])
         class_name, confidence = best_revive
         
-        # High confidence - very reliable
+        # Very high confidence - very reliable (increased threshold)
+        if confidence >= 0.30:
+            if len(filtered_detections) > 1:
+                second_best = sorted(filtered_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.18:
+                    logger.info(f"✅ revive detected{context} - Strong multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+                    return True
+            logger.info(f"✅ revive detected{context} - Very high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            return True
+        
+        # High confidence - reliable (increased threshold)
         if confidence >= 0.25:
-            if len(revive_detections) > 1:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                if second_best[1] >= 0.15:
-                    logger.info(f"✅ revived detected{context} - Strong multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+            if len(filtered_detections) > 1:
+                second_best = sorted(filtered_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.16:
+                    logger.info(f"✅ revive detected{context} - Multiple high-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
-            logger.info(f"✅ revived detected{context} - High confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            logger.info(f"✅ revive detected{context} - High confidence (Class: {class_name}, Confidence: {confidence:.3f})")
             return True
         
-        # Medium-high confidence
+        # Medium-high confidence - require multiple confirmations (stricter)
         if confidence >= 0.20:
-            if len(revive_detections) > 1:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                if second_best[1] >= 0.12:
-                    logger.info(f"✅ revived detected{context} - Multiple confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+            if len(filtered_detections) >= 2:
+                second_best = sorted(filtered_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.15:
+                    logger.info(f"✅ revive detected{context} - Multiple medium-high confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
-            logger.info(f"✅ revived detected{context} - Medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
-            return True
+            # Single detection needs higher confidence
+            if confidence >= 0.23:
+                logger.info(f"✅ revive detected{context} - Single medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+                return True
         
-        # Medium confidence - require multiple confirmations
+        # Medium confidence - require strong multiple confirmations
         if confidence >= 0.15:
-            if len(revive_detections) > 1:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                if second_best[1] >= 0.10:
-                    logger.info(f"✅ revived detected{context} - Multiple medium-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
+            if len(filtered_detections) >= 2:
+                second_best = sorted(filtered_detections, key=lambda x: x[1], reverse=True)[1]
+                if second_best[1] >= 0.15:  # Both must be at least 0.15
+                    logger.info(f"✅ revive detected{context} - Multiple medium-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
                     return True
-            if confidence >= 0.18:
-                logger.info(f"✅ revived detected{context} - Single medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
+            # Single detection needs higher confidence
+            if confidence >= 0.20:
+                logger.info(f"✅ revive detected{context} - Single medium-high confidence (Class: {class_name}, Confidence: {confidence:.3f})")
                 return True
         
-        # Low confidence - require strong multiple confirmations
-        if confidence >= 0.10:
-            if len(revive_detections) >= 2:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                if second_best[1] >= 0.10:
-                    logger.info(f"✅ revived detected{context} - Multiple low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
-                    return True
-            if confidence >= 0.13:
-                logger.info(f"✅ revived detected{context} - Single low-confidence (Class: {class_name}, Confidence: {confidence:.3f})")
-                return True
-        
-        # Very low confidence - require multiple strong confirmations
-        if confidence >= 0.08:
-            if len(revive_detections) >= 3:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                third_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[2]
-                if second_best[1] >= 0.08 and third_best[1] >= 0.08:
-                    logger.info(f"✅ revived detected{context} - Multiple very-low-confidence confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f}, Third: {third_best[1]:.3f})")
-                    return True
-            if len(revive_detections) >= 2:
-                second_best = sorted(revive_detections, key=lambda x: x[1], reverse=True)[1]
-                if second_best[1] >= 0.09:
-                    logger.info(f"✅ revived detected{context} - Strong pair confirmations (Class: {class_name}, Confidence: {confidence:.3f}, Second: {second_best[1]:.3f})")
-                    return True
-        
+        # Below minimum confidence threshold - reject
+        logger.debug(f"⚠️ Revive detection rejected{context} - confidence too low (best: {confidence:.3f}, required: {min_confidence})")
         return False
     
-    def _process_yolo_revive_detection(self, image, resize_to=None):
-        """Process YOLO revive detection on image with optional resize."""
+    def _process_yolo_revive_detection(self, image, resize_to=None, min_confidence=0.15):
+        """
+        Process YOLO revive detection on image with optional resize.
+        
+        Args:
+            image: Input image (numpy array)
+            resize_to: Optional tuple (width, height) to resize image
+            min_confidence: Minimum confidence threshold for detections (default 0.15, stricter)
+        
+        Returns:
+            bool: True if revive is detected and validated, False otherwise
+        """
         if self.model is None or image is None or image.size == 0:
             return False
         
@@ -410,8 +716,11 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             processed_image = image
         
         try:
-            results = self.model.predict(processed_image, conf=0.08, verbose=False, device='cpu')
+            # Use higher confidence threshold for initial filtering
+            # Still scan with lower threshold but validate strictly
+            results = self.model.predict(processed_image, conf=min_confidence * 0.6, verbose=False, device='cpu')
         except Exception as e:
+            logger.debug(f"⚠️ YOLO predict error: {e}")
             return False
         
         if not results or len(results) == 0:
@@ -430,15 +739,18 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                 class_id = int(box.cls[0].cpu().numpy())
                 class_name = names_map.get(class_id, f"class_{class_id}") if names_map else f"class_{class_id}"
                 
-                if self._is_revive_class(class_name) and confidence >= 0.08:
+                # Collect all revive class detections (validation will filter by confidence)
+                if self._is_revive_class(class_name):
                     revive_detections.append((class_name, confidence))
             except Exception as e:
                 continue
         
-        return self._validate_revive_detections(revive_detections)
+        # Validate with stricter thresholds
+        context = f" (min_conf: {min_confidence:.2f})"
+        return self._validate_revive_detections(revive_detections, context=context, min_confidence=min_confidence)
     
     def _detect_revive_status(self, image):
-        """revived detection using YOLOv11."""
+        """revive detection using YOLOv11."""
         try:
             return self._process_yolo_revive_detection(image)
         except Exception as e:
@@ -457,14 +769,14 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             return "gun knockout"
         
         status_lower = status.lower().strip()
-        valid_statuses = ["revived", "gun knockout", "kill"]
+        valid_statuses = ["revive", "gun knockout", "kill"]
         
         if status_lower not in valid_statuses:
             logger.warning(f"⚠️ Invalid status '{status}', defaulting to gun knockout")
             return "gun knockout"
         
-        if status_lower == "revived":
-            return "revived"
+        if status_lower == "revive":
+            return "revive"
         
         if status_lower in ["gun knockout", "kill"]:
             return status_lower
@@ -716,17 +1028,47 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
                     logger.info(f"✅ kill - Fallback red (red: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
                     return "kill"
             
-            # Final decision with bias toward gun knockout (more common)
-            if white_ratio > red_ratio * 1.5 and white_ratio >= 0.008:
-                logger.info(f"✅ gun knockout - Final decision (white dominant: {white_ratio:.4f} vs {red_ratio:.4f})")
+            # Final decision with sharper thresholds to reduce ambiguous cases
+            # Use tighter ratios and absolute differences for better discrimination
+            white_dominance = white_ratio / red_ratio if red_ratio > 0 else float('inf')
+            red_dominance = red_ratio_adjusted / white_ratio if white_ratio > 0 else float('inf')
+            absolute_diff = abs(white_ratio - red_ratio_adjusted)
+            
+            # Sharper decision: prefer whichever has both higher ratio AND absolute difference
+            if white_ratio >= 0.008 and (white_dominance >= 1.3 or (white_ratio > red_ratio_adjusted + 0.003)):
+                # White is clearly dominant
+                logger.info(f"✅ gun knockout - Final decision (white dominant: {white_ratio:.4f} vs {red_ratio:.4f}, dominance: {white_dominance:.2f}x)")
                 return "gun knockout"
-            elif red_ratio_adjusted > white_ratio * 1.8 and red_ratio_adjusted >= 0.008:
-                if red_rgb_ratio > 0.04:
-                    logger.info(f"✅ kill - Final decision (red dominant: {red_ratio_adjusted:.4f} vs {white_ratio:.4f})")
+            elif red_ratio_adjusted >= 0.008 and (red_dominance >= 1.5 or (red_ratio_adjusted > white_ratio + 0.004)):
+                # Red is clearly dominant - require RGB validation for kill
+                if red_rgb_ratio > 0.03:  # Lowered threshold slightly
+                    logger.info(f"✅ kill - Final decision (red dominant: {red_ratio_adjusted:.4f} vs {white_ratio:.4f}, dominance: {red_dominance:.2f}x)")
                     return "kill"
+                else:
+                    # Red detected but RGB validation failed - likely gun knockout with slight red tint
+                    logger.info(f"✅ gun knockout - Red detected but RGB validation failed (red: {red_ratio_adjusted:.4f}, white: {white_ratio:.4f})")
+                    return "gun knockout"
             else:
-                logger.warning(f"⚠️ Ambiguous - defaulting to gun knockout (Red: {red_ratio:.4f}, White: {white_ratio:.4f})")
-                return "gun knockout"
+                # Still ambiguous - use more sophisticated fallback
+                # Check RGB ratios and absolute values
+                if white_rgb_ratio > red_rgb_ratio * 1.2 and white_ratio >= 0.006:
+                    logger.info(f"✅ gun knockout - RGB-based decision (white RGB: {white_rgb_ratio:.4f} vs red RGB: {red_rgb_ratio:.4f})")
+                    return "gun knockout"
+                elif red_rgb_ratio > white_rgb_ratio * 1.5 and red_ratio_adjusted >= 0.006:
+                    logger.info(f"✅ kill - RGB-based decision (red RGB: {red_rgb_ratio:.4f} vs white RGB: {white_rgb_ratio:.4f})")
+                    return "kill"
+                else:
+                    # Last resort: use whichever is higher with minimum threshold
+                    if white_ratio >= 0.006 and white_ratio > red_ratio_adjusted:
+                        logger.info(f"✅ gun knockout - Fallback decision (white: {white_ratio:.4f} vs red: {red_ratio:.4f})")
+                        return "gun knockout"
+                    elif red_ratio_adjusted >= 0.006 and red_ratio_adjusted > white_ratio:
+                        logger.info(f"✅ kill - Fallback decision (red: {red_ratio_adjusted:.4f} vs white: {white_ratio:.4f})")
+                        return "kill"
+                    else:
+                        # Truly ambiguous - log but default to gun knockout (more common)
+                        logger.warning(f"⚠️ Ambiguous - defaulting to gun knockout (Red: {red_ratio:.4f}, White: {white_ratio:.4f}, RedRGB: {red_rgb_ratio:.4f}, WhiteRGB: {white_rgb_ratio:.4f})")
+                        return "gun knockout"
             
         except Exception as e:
             logger.error(f"⚠️ Color analysis error: {e}")
@@ -779,14 +1121,21 @@ def serve(model_path="best.pt", port=50051, max_workers=10):
     logger.info("🔄 Server loop started - will run until stopped (Ctrl+C)")
     logger.info("💡 Server is ready to accept connections. Run your client code now.")
     
-    # Use a robust loop that keeps the server running
+    # Use a robust loop that keeps the server running FOREVER
     # wait_for_termination raises FutureTimeoutError on timeout (normal) and returns None when terminated
     consecutive_errors = 0
-    max_consecutive_errors = 100  # Only stop after 100 consecutive errors
+    max_consecutive_errors = 10000  # Very high limit - server should never stop on errors
+    gc_counter = 0  # Counter for periodic garbage collection
     
     try:
         while True:
             try:
+                # Periodic garbage collection every 100 iterations to prevent memory buildup
+                gc_counter += 1
+                if gc_counter >= 100:
+                    gc.collect()
+                    gc_counter = 0
+                
                 # Wait for termination with timeout
                 # This raises a timeout exception when timeout expires (normal - server still running)
                 # Returns None when server is actually terminated
@@ -827,15 +1176,14 @@ def serve(model_path="best.pt", port=50051, max_workers=10):
                     import traceback
                     logger.debug(traceback.format_exc())
                 
-                # If too many consecutive errors, something is seriously wrong
+                # Never stop on errors - keep running indefinitely
+                # Only log warning if errors are very high, but continue running
                 if consecutive_errors >= max_consecutive_errors:
-                    logger.error(f"❌ Too many consecutive errors ({consecutive_errors}), server may be unstable")
-                    logger.error("🛑 Stopping server due to repeated errors")
-                    try:
-                        server.stop(0)
-                    except:
-                        pass
-                    break
+                    logger.warning(f"⚠️ High error count ({consecutive_errors}), but server will continue running")
+                    logger.warning("💡 Server will keep running - errors are being handled gracefully")
+                    # Reset counter to prevent spam, but keep running
+                    consecutive_errors = max_consecutive_errors - 10  # Reset to allow more errors
+                    # Continue running - never break
                 
                 # Continue running - server should not stop on errors
                 time.sleep(0.5)  # Small delay before continuing to avoid tight error loop

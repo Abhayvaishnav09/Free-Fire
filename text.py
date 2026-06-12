@@ -11,10 +11,13 @@ Date: 2024
 import cv2
 import numpy as np
 import os
+import re
 from datetime import datetime
 from typing import List, Dict, Tuple
 from sklearn.cluster import KMeans
 from collections import Counter
+
+_PLAYER_TAG_PATTERN = re.compile(r'[A-Z0-9]{2,}\.[A-Z0-9]{2,}', re.IGNORECASE)
 
 # Lazy import of paddleocr - will be imported only when FreeFireTextDetector is instantiated
 # This prevents OSError during module import
@@ -54,10 +57,14 @@ class FreeFireTextDetector:
         except Exception as e:
             raise ImportError(f"Failed to initialize PaddleOCR: {e}")
         
-        # Disable name saving outputs
-        self.output_dir = None
-        self.killer_dir = None
-        self.victim_dir = None
+        # Set up output directories for cropped images
+        self.output_dir = "cropped_text"
+        self.killer_dir = os.path.join(self.output_dir, "killer")
+        self.victim_dir = os.path.join(self.output_dir, "victim")
+        
+        # Create directories if they don't exist
+        os.makedirs(self.killer_dir, exist_ok=True)
+        os.makedirs(self.victim_dir, exist_ok=True)
         
         # CSS color mapping for better color names
         self.css_colors = {
@@ -292,10 +299,14 @@ class FreeFireTextDetector:
         Returns:
             Dict: Color detection results
         """
+        # Check if path is valid
+        if not cropped_image_path or not os.path.exists(cropped_image_path):
+            return {"name": "unknown", "rgb": (0, 0, 0), "hex": "#000000"}
+        
         # Load the cropped image
         image = cv2.imread(cropped_image_path)
-        if image is None:
-            return {"error": "Could not load cropped image"}
+        if image is None or image.size == 0:
+            return {"name": "unknown", "rgb": (0, 0, 0), "hex": "#000000"}
         
         
         # Try Method A (OCR-based with text pixel isolation)
@@ -380,6 +391,103 @@ class FreeFireTextDetector:
         cleaned = ' '.join(cleaned.split())
         
         return cleaned
+
+    def _format_ocr_line(self, bbox, text, conf) -> Dict:
+        """Convert one OCR detection into a normalized text region dict."""
+        x_coords = [point[0] for point in bbox]
+        y_coords = [point[1] for point in bbox]
+        x, y = min(x_coords), min(y_coords)
+        w = max(x_coords) - x
+        h = max(y_coords) - y
+        cleaned_text = self._clean_text(str(text).strip())
+        if cleaned_text and len(cleaned_text) > 1 and w > 10 and h > 8 and conf > 0.005:
+            return {
+                'text': cleaned_text,
+                'bbox': (int(x), int(y), int(w), int(h)),
+                'confidence': float(conf),
+            }
+        return None
+
+    def _parse_predict_result(self, predict_result) -> List[Dict]:
+        """Parse PaddleOCR 3.x predict() output."""
+        formatted_results = []
+        if not isinstance(predict_result, list) or not predict_result:
+            return formatted_results
+        result_dict = predict_result[0]
+        if not isinstance(result_dict, dict):
+            return formatted_results
+        rec_texts = result_dict.get('rec_texts', [])
+        rec_scores = result_dict.get('rec_scores', [])
+        rec_polys = result_dict.get('rec_polys', [])
+        for i, text in enumerate(rec_texts):
+            if i >= len(rec_scores) or i >= len(rec_polys):
+                continue
+            conf = float(rec_scores[i])
+            poly = rec_polys[i]
+            if conf <= 0.005 or poly is None:
+                continue
+            try:
+                if hasattr(poly, 'tolist'):
+                    poly = poly.tolist()
+                if not isinstance(poly, list) or not poly:
+                    continue
+                if isinstance(poly[0], (list, tuple)) and len(poly[0]) >= 2:
+                    x_coords = [float(point[0]) for point in poly]
+                    y_coords = [float(point[1]) for point in poly]
+                    bbox = list(zip(x_coords, y_coords))
+                    item = self._format_ocr_line(bbox, text, conf)
+                    if item:
+                        formatted_results.append(item)
+            except Exception:
+                continue
+        return formatted_results
+
+    def _parse_ocr_result(self, ocr_result) -> List[Dict]:
+        """Parse PaddleOCR 2.x ocr() output."""
+        formatted_results = []
+        if not ocr_result or not isinstance(ocr_result, list):
+            return formatted_results
+        results = ocr_result[0] if isinstance(ocr_result[0], list) else ocr_result
+        for line in results:
+            if line is None or len(line) < 2:
+                continue
+            try:
+                bbox, (text, conf) = line
+                item = self._format_ocr_line(bbox, text, conf)
+                if item:
+                    formatted_results.append(item)
+            except Exception:
+                continue
+        return formatted_results
+
+    def _run_paddle_ocr(self, image: np.ndarray) -> List[Dict]:
+        """Run PaddleOCR using predict() or ocr(), whichever the installed version supports."""
+        reader = self.paddleocr_reader
+        if hasattr(reader, 'predict'):
+            try:
+                return self._parse_predict_result(reader.predict(image))
+            except Exception:
+                pass
+        if hasattr(reader, 'ocr'):
+            try:
+                return self._parse_ocr_result(reader.ocr(image))
+            except Exception:
+                pass
+        return []
+
+    def _split_merged_player_tags(self, text: str) -> Tuple[str, str]:
+        """Split one OCR blob that contains both killer and victim tags."""
+        if not text:
+            return '', ''
+        tags = _PLAYER_TAG_PATTERN.findall(text.upper())
+        if len(tags) >= 2:
+            return tags[0], tags[-1]
+        if len(tags) == 1:
+            return '', tags[0]
+        parts = [part.strip() for part in re.split(r'\s+', text.strip()) if part.strip()]
+        if len(parts) >= 2:
+            return parts[0], parts[-1]
+        return '', text.strip()
     
     def detect_text_regions(self, image: np.ndarray) -> List[Dict]:
         """
@@ -391,197 +499,145 @@ class FreeFireTextDetector:
         Returns:
             List[Dict]: List of text detection results
         """
-        formatted_results = []
-        
-        # Validate image before processing
         if image is None or not isinstance(image, np.ndarray):
             return []
-        
-        # Ensure image is in correct format
         if len(image.shape) != 3 or image.shape[2] != 3:
             return []
-        
         height, width = image.shape[:2]
         if height < 10 or width < 10:
             return []
-        
-        # Ensure uint8 type
         if image.dtype != np.uint8:
             if image.dtype in [np.float32, np.float64]:
-                if image.max() <= 1.0:
-                    image = (image * 255).astype(np.uint8)
-                else:
-                    image = image.astype(np.uint8)
+                image = (image * 255).astype(np.uint8) if image.max() <= 1.0 else image.astype(np.uint8)
             else:
                 image = image.astype(np.uint8)
-        
-        # Try detection on original image first
-        # PaddleOCR 3.3.1+ uses predict() method with new format
+
+        formatted_results = self._run_paddle_ocr(image)
+        if formatted_results:
+            return formatted_results
+
         try:
-            # Use predict() method for new API
-            predict_result = self.paddleocr_reader.predict(image)
-            
-            # New API returns list with dict containing: rec_texts, rec_scores, rec_polys
-            if isinstance(predict_result, list) and len(predict_result) > 0:
-                result_dict = predict_result[0]
-                if isinstance(result_dict, dict):
-                    rec_texts = result_dict.get('rec_texts', [])
-                    rec_scores = result_dict.get('rec_scores', [])
-                    rec_polys = result_dict.get('rec_polys', [])
-                    
-                    # Combine text, scores, and polygons
-                    for i, text in enumerate(rec_texts):
-                        if i < len(rec_scores) and i < len(rec_polys):
-                            conf = float(rec_scores[i]) if i < len(rec_scores) else 0.0
-                            poly = rec_polys[i] if i < len(rec_polys) else None
-                            
-                            # Check if we have valid data - handle numpy arrays in text
-                            if conf > 0.005:
-                                # Convert text to string if it's not already
-                                if not isinstance(text, str):
-                                    if hasattr(text, 'item'):
-                                        text = str(text.item())
-                                    else:
-                                        text = str(text)
-                                
-                                if text and len(text.strip()) > 0:
-                                    # Convert polygon to bbox - handle numpy arrays properly
-                                    if poly is not None:
-                                        try:
-                                            # Convert to list if it's a numpy array
-                                            if hasattr(poly, 'tolist'):
-                                                poly = poly.tolist()
-                                            
-                                            # Ensure poly is a list of points
-                                            if isinstance(poly, list) and len(poly) > 0:
-                                                # Handle different poly formats
-                                                if isinstance(poly[0], (list, tuple)) and len(poly[0]) >= 2:
-                                                    x_coords = [float(point[0]) for point in poly]
-                                                    y_coords = [float(point[1]) for point in poly]
-                                                    x, y = min(x_coords), min(y_coords)
-                                                    w = max(x_coords) - x
-                                                    h = max(y_coords) - y
-                                                    
-                                                    cleaned_text = self._clean_text(text.strip())
-                                                    if cleaned_text and len(cleaned_text) > 1:
-                                                        # Filter out very small text regions (likely noise)
-                                                        if w > 10 and h > 8:
-                                                            formatted_results.append({
-                                                                'text': cleaned_text,
-                                                                'bbox': (int(x), int(y), int(w), int(h)),
-                                                                'confidence': conf
-                                                            })
-                                        except Exception as e:
-                                            # Skip this text if polygon parsing fails
-                                            continue
-                    
-                    if formatted_results:
-                        return formatted_results
-        except RuntimeError as e:
-            # PaddleOCR runtime errors - try fallback method
-            error_msg = str(e).lower()
-            if "unknown exception" in error_msg or "runtime" in error_msg:
-                # Silently try fallback - don't print error
-                pass
-            else:
-                # Other runtime errors - log but continue
-                pass
+            processed_image = self.preprocess_image(image)
+            formatted_results = self._run_paddle_ocr(processed_image)
         except Exception as e:
-            error_msg = str(e)
-            # Don't print verbose errors - just continue to fallback
-            pass
-        
-        # Fallback: Try ocr() method (older API compatibility)
-        try:
-            results_original = self.paddleocr_reader.ocr(image)
-            if results_original and isinstance(results_original, list) and len(results_original) > 0:
-                results = results_original[0] if isinstance(results_original[0], list) else results_original
-                
-                for line in results:
-                    if line is None or len(line) < 2:
-                        continue
-                    
-                    try:
-                        bbox, (text, conf) = line
-                        if conf > 0.005:
-                            x_coords = [point[0] for point in bbox]
-                            y_coords = [point[1] for point in bbox]
-                            x, y = min(x_coords), min(y_coords)
-                            w = max(x_coords) - x
-                            h = max(y_coords) - y
-                            
-                            cleaned_text = self._clean_text(text.strip())
-                            if cleaned_text and len(cleaned_text) > 1:
-                                if w > 10 and h > 8:
-                                    formatted_results.append({
-                                        'text': cleaned_text,
-                                        'bbox': (int(x), int(y), int(w), int(h)),
-                                        'confidence': conf
-                                    })
-                    except Exception:
-                        continue
-        except Exception as e:
-            print(f"⚠️ OCR fallback error: {e}")
-        
-        # If still no results, try preprocessed image
-        if not formatted_results:
-            try:
-                processed_image = self.preprocess_image(image)
-                predict_result = self.paddleocr_reader.predict(processed_image)
-                
-                if isinstance(predict_result, list) and len(predict_result) > 0:
-                    result_dict = predict_result[0]
-                    if isinstance(result_dict, dict):
-                        rec_texts = result_dict.get('rec_texts', [])
-                        rec_scores = result_dict.get('rec_scores', [])
-                        rec_polys = result_dict.get('rec_polys', [])
-                        
-                        for i, text in enumerate(rec_texts):
-                            if i < len(rec_scores) and i < len(rec_polys):
-                                conf = float(rec_scores[i]) if i < len(rec_scores) else 0.0
-                                poly = rec_polys[i] if i < len(rec_polys) else None
-                                
-                                # Check if we have valid data - handle numpy arrays in text
-                                if conf > 0.005:
-                                    # Convert text to string if it's not already
-                                    if not isinstance(text, str):
-                                        if hasattr(text, 'item'):
-                                            text = str(text.item())
-                                        else:
-                                            text = str(text)
-                                    
-                                    if text and len(text.strip()) > 0:
-                                        if poly is not None:
-                                            try:
-                                                # Convert to list if it's a numpy array
-                                                if hasattr(poly, 'tolist'):
-                                                    poly = poly.tolist()
-                                                
-                                                # Ensure poly is a list of points
-                                                if isinstance(poly, list) and len(poly) > 0:
-                                                    # Handle different poly formats
-                                                    if isinstance(poly[0], (list, tuple)) and len(poly[0]) >= 2:
-                                                        x_coords = [float(point[0]) for point in poly]
-                                                        y_coords = [float(point[1]) for point in poly]
-                                                        x, y = min(x_coords), min(y_coords)
-                                                        w = max(x_coords) - x
-                                                        h = max(y_coords) - y
-                                                        
-                                                        cleaned_text = self._clean_text(text.strip())
-                                                        if cleaned_text and len(cleaned_text) > 1:
-                                                            if w > 10 and h > 8:
-                                                                formatted_results.append({
-                                                                    'text': cleaned_text,
-                                                                    'bbox': (int(x), int(y), int(w), int(h)),
-                                                                    'confidence': conf
-                                                                })
-                                            except Exception as e:
-                                                # Skip this text if polygon parsing fails
-                                                continue
-            except Exception as e:
-                print(f"⚠️ OCR error on processed image: {e}")
-        
+            print(f"⚠️ OCR error on processed image: {e}")
+
         return formatted_results
+    
+    def extract_text_left_to_right(self, text_regions: List[Dict]) -> List[Dict]:
+        """
+        Extract text regions sorted strictly left-to-right by x-coordinate.
+        This ensures killer (leftmost) and victim (rightmost) are in correct order.
+        
+        Args:
+            text_regions (List[Dict]): List of detected text regions
+            
+        Returns:
+            List[Dict]: Text regions sorted by x-coordinate (left to right)
+        """
+        if not text_regions:
+            return []
+        
+        # Sort by leftmost x-coordinate (bbox[0])
+        sorted_regions = sorted(text_regions, key=lambda r: r['bbox'][0])
+        return sorted_regions
+    
+    def extract_killfeed_sequence(self, image: np.ndarray) -> Dict:
+        """
+        Extract killfeed text in correct sequence: killer → status → victim.
+        Reads text from left to right to maintain correct order and validates positions.
+        
+        Args:
+            image (np.ndarray): Cropped killfeed image
+            
+        Returns:
+            Dict: {
+                'killer': str,  # Leftmost text (killer name)
+                'victim': str,  # Rightmost text (victim name)
+                'status': None,  # Status determined by color analysis (not here)
+                'confidence': float  # Average confidence
+            }
+        """
+        if image is None or image.size == 0:
+            return {'killer': '', 'victim': '', 'status': None, 'confidence': 0.0}
+        
+        # Detect all text regions
+        text_regions = self.detect_text_regions(image)
+        
+        if not text_regions or len(text_regions) < 2:
+            if len(text_regions) == 1:
+                region = text_regions[0]
+                killer, victim = self._split_merged_player_tags(region['text'])
+                if killer and victim:
+                    return {
+                        'killer': killer,
+                        'victim': victim,
+                        'status': None,
+                        'confidence': region['confidence'],
+                    }
+                return {
+                    'killer': '',
+                    'victim': region['text'].strip(),
+                    'status': None,
+                    'confidence': region['confidence'],
+                }
+            return {'killer': '', 'victim': '', 'status': None, 'confidence': 0.0}
+        
+        # Sort text regions strictly left-to-right by x-coordinate
+        sorted_regions = self.extract_text_left_to_right(text_regions)
+        
+        # Filter out very low confidence regions
+        filtered_regions = [r for r in sorted_regions if r['confidence'] > 0.3]
+        
+        if len(filtered_regions) < 2:
+            # If filtering removed too many, use original sorted list
+            filtered_regions = sorted_regions[:2]
+        
+        # STRICT LEFT-TO-RIGHT: First (leftmost) = killer, Second (rightmost) = victim
+        # NO SWAPPING ALLOWED - trust the X-coordinate sorting
+        killer_region = filtered_regions[0]  # First = leftmost = killer
+        victim_region = filtered_regions[-1]  # Last = rightmost = victim
+        
+        # If we have more than 2 regions, still use first and last (strict left-to-right)
+        if len(filtered_regions) > 2:
+            # Use first (leftmost) as killer - NEVER SWAP
+            killer_region = filtered_regions[0]
+            # Use last (rightmost) as victim - NEVER SWAP
+            victim_region = filtered_regions[-1]
+        
+        # Position validation: Verify left-to-right order (for logging only, NO SWAPPING)
+        killer_x_left = killer_region['bbox'][0]  # Left edge of killer
+        victim_x_left = victim_region['bbox'][0]  # Left edge of victim
+        
+        # Log if order seems incorrect (but NEVER swap)
+        if killer_x_left > victim_x_left:
+            print(f"⚠️ OCR WARNING: Killer left edge ({killer_x_left}) > Victim left edge ({victim_x_left})")
+            print(f"   Killer: '{killer_region['text']}' | Victim: '{victim_region['text']}'")
+            print(f"   ⚠️  ORDER MAINTAINED AS-IS (no swap) - trusting X-coordinate sort")
+        
+        # Additional validation: Log position info (for debugging, NO SWAPPING)
+        image_width = image.shape[1]
+        midpoint = image_width / 2
+        
+        killer_x_center = killer_region['bbox'][0] + killer_region['bbox'][2] / 2
+        victim_x_center = victim_region['bbox'][0] + victim_region['bbox'][2] / 2
+        
+        killer_is_left_half = killer_x_center < midpoint
+        victim_is_right_half = victim_x_center > midpoint
+        
+        if not killer_is_left_half or not victim_is_right_half:
+            print(f"⚠️ OCR: Position validation - Killer: '{killer_region['text']}' (left: {killer_is_left_half}), Victim: '{victim_region['text']}' (right: {victim_is_right_half})")
+            print(f"   ⚠️  ORDER MAINTAINED AS-IS (no swap) - trusting strict left-to-right X-coordinate sort")
+        
+        # Calculate average confidence
+        avg_confidence = (killer_region['confidence'] + victim_region['confidence']) / 2.0
+        
+        return {
+            'killer': killer_region['text'].strip(),
+            'victim': victim_region['text'].strip(),
+            'status': None,  # Status determined by color analysis in ffkillblock.py
+            'confidence': avg_confidence
+        }
     
     def classify_text_positions(self, text_regions: List[Dict], image_width: int) -> Tuple[List[Dict], List[Dict]]:
         """
@@ -681,8 +737,34 @@ class FreeFireTextDetector:
             # Fallback: use original coordinates with no padding
             cropped_text = text_area
         
-        # Do not save cropped images; return empty path
-        return ""
+        # Ensure we have a valid cropped image
+        if cropped_text.size == 0:
+            return ""
+        
+        # Generate filename with timestamp and text content
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]  # Include milliseconds
+        safe_text = "".join(c for c in text if c.isalnum() or c in '._-')[:20]  # Limit length
+        filename = f"{index:03d}_{safe_text}_{timestamp}.png"
+        
+        # Determine output directory based on text type
+        if text_type == "killer":
+            output_dir = self.killer_dir
+        elif text_type == "victim":
+            output_dir = self.victim_dir
+        else:
+            output_dir = self.output_dir
+        
+        # Create directory if it doesn't exist
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save the cropped image
+        filepath = os.path.join(output_dir, filename)
+        success = cv2.imwrite(filepath, cropped_text)
+        
+        if success:
+            return filepath
+        else:
+            return ""
     
     def process_image(self, image_path: str) -> Dict:
         """
