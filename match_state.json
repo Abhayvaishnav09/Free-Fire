@@ -1,9 +1,9 @@
 {
-  "detection_sequence": 386,
-  "detected_count": 355,
-  "saved_count": 355,
+  "detection_sequence": 636,
+  "detected_count": 555,
+  "saved_count": 554,
   "failed_count": 0,
-  "frame_count_offset": 1002,
-  "last_saved": "2025-11-10T18:30:54.687660",
-  "timestamp": 1762779654.6876788
+  "frame_count_offset": 2010,
+  "last_saved": "2025-11-11T13:35:40.987659",
+  "timestamp": 1762848340.9876788
 }
