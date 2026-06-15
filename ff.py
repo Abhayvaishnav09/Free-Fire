@@ -75,6 +75,37 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 os.environ.setdefault('OMP_NUM_THREADS', '1')
 warnings.filterwarnings("ignore")
 
+# ---------------------------------------------------------------------------
+# Current-match roster  — update this list before each match
+# Used by _snap_to_roster() to correct OCR noise without slowing the pipeline
+# ---------------------------------------------------------------------------
+MATCH_PLAYERS = [
+    # K9 ESPORTS
+    "K9.HUNNYSUNY", "K9.ZIYANN", "K9.DAAFIQ", "K9.AIM84", "K9.ZORO",
+    # REVENANT XSPARK
+    "RNTX.ARSH17", "RNTX.VINCENT", "RNTX.XDIVINE", "RNTX.ROSHAN", "RNTX.BLACK",
+    # AEROBOTZ ESPORTS
+    "ARZ.JOHAN", "ARZ.PRODIGY", "ARZ.MADGOD", "ARZ.KUNAL19", "ARZ.FLIX24",
+    # IQOO OGxTSG
+    "IQOG.ARJUN", "IQOG.AAYUSH4", "IQOG.LEGEND", "IQOG.KRISH", "IQOG.PANDAT",
+    # GODLIKE ESPORTS
+    "GODL.YOGI", "GODL.ECOECO", "GODL.MARCO", "GODL.NANCY", "GODL.NOBITA",
+    # METANINZA
+    "MNZ.ZAP", "MNZ.JARVIS16", "MNZ.GINOTRA", "MNZ.ANSHU26", "MNZ.RNS",
+    # GG INSTINCT
+    "GGI.PATLU", "GGI.SWARUP", "GGI.POWER", "GGI.TIGER", "GGI.RABARI11",
+    # TEAM TAMILAS
+    "TT.KHONSHU", "TT.YOGESH23", "TT.SCRIPT18", "TT.KOWSIK24", "TT.RAIN21",
+    # RECKONING ESP
+    "RGE.HEMU", "RGE.WILDFOX9", "RGE.SABOS", "RGE.ASH", "RGE.LEVELUP",
+    # WINDGODxTHW ESP
+    "WIND.JANGO", "WIND.GOKUL", "WIND.NYM", "WIND.KINGSTN", "WIND.BRAVE",
+    # 4ENDS ESPORTS
+    "4END.AVJIT", "4END.RAICHU", "4END.CYBER", "4END.SURYA", "4END.ARIJEET",
+    # EMZ ESPORTS
+    "EMZ.MAC", "EMZ.ADITYA", "EMZ.MRANI", "EMZ.RUPESH", "EMZ.SID18",
+]
+
 
 class KillblockDetector:
     """OCR Client for processing cropped killblock images.
@@ -175,6 +206,9 @@ class KillblockDetector:
         self.known_players = set()
         self.team_rosters = {}
         self.all_player_names = []
+        # Match-specific roster for OCR snapping (set via set_match_roster)
+        self._match_roster_names: list = []
+        self._match_roster_suffixes: dict = {}  # suffix_after_dot → full_name
         
         # OPTIMIZED: API connection pool for faster requests
         self.api_session = None
@@ -854,24 +888,24 @@ class KillblockDetector:
                     # Merge back and convert to BGR
                     lab_enhanced = cv2.merge([l_enhanced, a, b])
                     processed = cv2.cvtColor(lab_enhanced, cv2.COLOR_LAB2BGR)
-            except Exception:
+                except Exception:
                     # Fallback: simple histogram equalization on grayscale
-                try:
+                    try:
                         gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
                         gray_eq = cv2.equalizeHist(gray)
                         processed = cv2.cvtColor(gray_eq, cv2.COLOR_GRAY2BGR)
-                except:
-                        pass  # Use original if enhancement fails
+                    except Exception:
+                        pass
             
             # Step 4: Light sharpening for enhanced strategy only (skip for default to preserve text)
             if strategy == 'enhanced':
-            try:
+                try:
                     # Light unsharp masking - too aggressive sharpening can break OCR
                     gaussian = cv2.GaussianBlur(processed, (0, 0), 1.0)
-                    processed = cv2.addWeighted(processed, 1.3, gaussian, -0.3, 0)  # Reduced from 1.8/-0.8
+                    processed = cv2.addWeighted(processed, 1.3, gaussian, -0.3, 0)
                     processed = np.clip(processed, 0, 255).astype(np.uint8)
-            except:
-                pass
+                except Exception:
+                    pass
             
             # Final validation before returning
             processed = self._validate_image_for_ocr(processed)
@@ -1217,7 +1251,81 @@ class KillblockDetector:
         
         # No good match found - return "unknown"
         return "unknown"
-    
+
+    # ------------------------------------------------------------------
+    # Match-roster snapping  (zero-latency — ~60 rapidfuzz comparisons)
+    # ------------------------------------------------------------------
+
+    def set_match_roster(self, player_names):
+        """Load canonical player names for the current match.
+
+        Call once per match with the full list of players (all teams + subs).
+        Enables high-accuracy OCR correction without slowing down the pipeline.
+
+        Args:
+            player_names: iterable of strings like ['K9.HUNNYSUNY', 'RNTX.ARSH17', ...]
+        """
+        names = [n.strip().upper() for n in player_names if n and n.strip()]
+        self._match_roster_names = names
+        # Build suffix → full_name map for prefix-mangled OCR results
+        self._match_roster_suffixes = {}
+        for name in names:
+            if '.' in name:
+                suffix = name.split('.', 1)[1]
+                if len(suffix) >= 3:
+                    self._match_roster_suffixes[suffix] = name
+        print(f"✅ Match roster loaded: {len(self._match_roster_names)} players")
+
+    def _snap_to_roster(self, name: str) -> str:
+        """Correct OCR noise by snapping name to the closest known match player.
+
+        Three-stage strategy (fastest first):
+          1. Exact match        — O(1)
+          2. WRatio full-name   — handles char substitutions, missing dot, etc.
+          3. Suffix-only match  — handles a mangled team prefix (e.g. 'K8.' → 'K9.')
+
+        Returns the canonical player name on a confident hit, else the original string.
+        Threshold tuned so that 1-2 OCR errors are corrected but wrong names are NOT snapped.
+        """
+        if not name or not RAPIDFUZZ_AVAILABLE:
+            return name
+
+        roster = self._match_roster_names
+        if not roster:
+            # Fall back to API-loaded names if match roster not set yet
+            if self.all_player_names:
+                roster = [n.upper() for n in self.all_player_names]
+            else:
+                return name
+
+        name_upper = name.strip().upper()
+
+        # Stage 1: exact hit
+        if name_upper in roster:
+            return name_upper
+
+        # Stage 2: full-name fuzzy (WRatio handles substitution + partial alignment)
+        result = process.extractOne(name_upper, roster, scorer=fuzz.WRatio)
+        if result and result[1] >= 75:
+            return result[0]
+
+        # Stage 3: suffix-only (catches "K8.HUNNYSUNY" → "K9.HUNNYSUNY")
+        suffixes = self._match_roster_suffixes
+        if suffixes:
+            if '.' in name_upper:
+                ocr_suffix = name_upper.split('.', 1)[1]
+            else:
+                ocr_suffix = name_upper  # no dot at all — try raw suffix match
+
+            if len(ocr_suffix) >= 3:
+                suf_result = process.extractOne(
+                    ocr_suffix, list(suffixes.keys()), scorer=fuzz.WRatio
+                )
+                if suf_result and suf_result[1] >= 82:
+                    return suffixes[suf_result[0]]
+
+        return name  # no confident match — keep raw OCR
+
     def _normalize_name(self, name):
         """ENHANCED: Robust name normalization with dot restoration and OCR error correction."""
         if not name or len(name) < self.min_name_length:
@@ -1337,7 +1445,7 @@ class KillblockDetector:
                 
                 # Ensure image is valid before writing
                 if not isinstance(preprocessed, np.ndarray):
-                return None, None, 0.0, 0.0, None, None
+                    return None, None, 0.0, 0.0, None, None
             
                 # ACCURACY: Use PNG for better quality (no compression artifacts)
                 # PNG preserves text edges better than JPEG for OCR
@@ -1483,7 +1591,7 @@ class KillblockDetector:
                     # Only victim detected - validate it's not "Play Zone"
                     victim_upper = victim.upper().strip()
                     if ('PLAY' in victim_upper and 'ZONE' in victim_upper) or victim_upper == 'ZONE' or victim_upper.startswith('ZONE'):
-                return None, None, 0.0, 0.0, None, None
+                        return None, None, 0.0, 0.0, None, None
             
                 # Return names with separate confidences and X positions
                 # CRITICAL: Ensure minimum confidence if names are valid
@@ -2175,14 +2283,9 @@ class KillblockDetector:
         if killer_name_normalized and victim_name_normalized and killer_name_normalized.upper() == victim_name_normalized.upper():
             return False
         
-        # CRITICAL: NO FUZZY MATCHING - Use OCR text directly as-is
-        # Send raw OCR results to TMS without any matching or transformation
-        # This ensures TMS receives exactly what OCR detected in the killblock
-        
-        # Use OCR text directly - no matching, no transformation
-        # Preserve original OCR text - use it if available, otherwise use normalized
-        final_killer_name = killer_name_normalized if killer_name_normalized else ""
-        final_victim_name = victim_name_normalized if victim_name_normalized else "" 
+        # Snap OCR names to known match roster (fast — ~60 rapidfuzz comparisons, negligible latency)
+        final_killer_name = self._snap_to_roster(killer_name_normalized) if killer_name_normalized else ""
+        final_victim_name = self._snap_to_roster(victim_name_normalized) if victim_name_normalized else ""
         
         # CRITICAL: Final validation - ensure we have at least one valid name before sending
         if not final_killer_name and not final_victim_name:
@@ -2842,7 +2945,10 @@ def main():
     
     try:
         detector = KillblockDetector(match_id=match_id, access_token=access_token, api_enabled=api_enabled)
-        
+
+        # Load current-match roster for OCR snapping
+        detector.set_match_roster(MATCH_PLAYERS)
+
         if detector.grpc_stub is None:
             return
         
@@ -2904,7 +3010,10 @@ def start_match(match_id=1, access_token=None, camera_index=1, stop_flag=None, f
                     api_enabled=True,
                     grpc_port=50051
                 )
-                
+
+                # Load current-match roster for OCR snapping (zero latency impact)
+                detector.set_match_roster(MATCH_PLAYERS)
+
                 # Verify team rosters were loaded
                 
                 # Create frame capture callback if not provided but camera_index is given (backward compatibility)

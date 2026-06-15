@@ -1,0 +1,68 @@
+{
+  "_HOW_TO_UPDATE": "Har match se pehle sirf yeh file update karo. ffkillblock.py KABHI mat chhedo.",
+  "_FORMAT": "TEAM_PREFIX.PLAYERNAME — sab UPPERCASE hona chahiye",
+  "_STEPS": "1) Naye players yahan daalo  2) File save karo  3) ffkillblock.py restart karo",
+
+  "teams": [
+    {
+      "team": "K9 ESPORTS",
+      "players": ["K9.HUNNYSUNY", "K9.ZIYANN", "K9.DAAFIQ", "K9.AIM84"],
+      "sub": "K9.ZORO"
+    },
+    {
+      "team": "REVENANT XSPARK",
+      "players": ["RNTX.ARSH17", "RNTX.VINCENT", "RNTX.XDIVINE", "RNTX.ROSHAN"],
+      "sub": "RNTX.BLACK"
+    },
+    {
+      "team": "AEROBOTZ ESPORTS",
+      "players": ["ARZ.JOHAN", "ARZ.PRODIGY", "ARZ.MADGOD", "ARZ.KUNAL19"],
+      "sub": "ARZ.FLIX24"
+    },
+    {
+      "team": "IQOO OGxTSG",
+      "players": ["IQOG.ARJUN", "IQOG.AAYUSH4", "IQOG.LEGEND", "IQOG.KRISH"],
+      "sub": "IQOG.PANDAT"
+    },
+    {
+      "team": "GODLIKE ESPORTS",
+      "players": ["GODL.YOGI", "GODL.ECOECO", "GODL.MARCO", "GODL.NANCY"],
+      "sub": "GODL.NOBITA"
+    },
+    {
+      "team": "METANINZA",
+      "players": ["MNZ.ZAP", "MNZ.JARVIS16", "MNZ.GINOTRA", "MNZ.ANSHU26"],
+      "sub": "MNZ.RNS"
+    },
+    {
+      "team": "GG INSTINCT",
+      "players": ["GGI.PATLU", "GGI.SWARUP", "GGI.POWER", "GGI.TIGER"],
+      "sub": "GGI.RABARI11"
+    },
+    {
+      "team": "TEAM TAMILAS",
+      "players": ["TT.KHONSHU", "TT.YOGESH23", "TT.SCRIPT18", "TT.KOWSIK24"],
+      "sub": "TT.RAIN21"
+    },
+    {
+      "team": "RECKONING ESP",
+      "players": ["RGE.HEMU", "RGE.WILDFOX9", "RGE.SABOS", "RGE.ASH"],
+      "sub": "RGE.LEVELUP"
+    },
+    {
+      "team": "WINDGODxTHW ESP",
+      "players": ["WIND.JANGO", "WIND.GOKUL", "WIND.NYM", "WIND.KINGSTN"],
+      "sub": "WIND.BRAVE"
+    },
+    {
+      "team": "4ENDS ESPORTS",
+      "players": ["4END.AVJIT", "4END.RAICHU", "4END.CYBER", "4END.SURYA"],
+      "sub": "4END.ARIJEET"
+    },
+    {
+      "team": "EMZ ESPORTS",
+      "players": ["EMZ.MAC", "EMZ.ADITYA", "EMZ.MRANI", "EMZ.RUPESH"],
+      "sub": "EMZ.SID18"
+    }
+  ]
+}

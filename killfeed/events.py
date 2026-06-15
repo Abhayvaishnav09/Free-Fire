@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Optional
 
@@ -15,8 +16,18 @@ class EventWriter:
         log_path: str = "killfeed.log",
         jsonl_path: str = "killfeed_events.jsonl",
     ):
-        self.log_path = log_path
-        self.jsonl_path = jsonl_path
+        self.log_path = os.path.abspath(log_path)
+        self.jsonl_path = os.path.abspath(jsonl_path)
+
+    def _append_line(self, path: str, line: str) -> None:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except OSError as exc:
+            print(f"⚠️ Failed to write killfeed log ({path}): {exc}")
 
     def log_event(
         self,
@@ -31,11 +42,7 @@ class EventWriter:
             f"| type={event.event_type} subtype={event.kill_type} "
             f"| icon={event.weapon} | hash={event.event_hash} | seq={sequence} | frame={frame}\n"
         )
-        try:
-            with open(self.log_path, "a", encoding="utf-8") as f:
-                f.write(line)
-        except OSError:
-            pass
+        self._append_line(self.log_path, line)
 
         record = {
             "killer": event.killer,
@@ -50,11 +57,7 @@ class EventWriter:
             "sequence": sequence,
             "time": event.time,
         }
-        try:
-            with open(self.jsonl_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
-        except OSError:
-            pass
+        self._append_line(self.jsonl_path, json.dumps(record) + "\n")
 
         print(
             f"✅ KILLFEED #{sequence}: {killer_display} → {event.victim} "

@@ -14,8 +14,8 @@ import numpy as np
 from killfeed.capture import CaptureThread, CameraSource
 from killfeed.dhash import pixel_mean_diff, strip_changed
 from killfeed.events import EventWriter
-from killfeed.parser import ParsedRow, signatures_from_rows
-from killfeed.queue_state import KillfeedState, parse_signature, signatures_match
+from killfeed.parser import ParsedRow
+from killfeed.queue_state import KillfeedState
 from killfeed.roi import StripStabilizer, detect_strip
 
 
@@ -342,19 +342,6 @@ class KillfeedPipeline:
             self._stats["events_emitted"] += 1
         return True
 
-    def _find_row_for_sig(self, sig: str, parsed_rows: list) -> Optional[ParsedRow]:
-        for pr in parsed_rows:
-            if pr.signature == sig:
-                return pr
-        for pr in parsed_rows:
-            if signatures_match(pr.signature, sig, self.state.fuzzy_threshold):
-                return pr
-        killer, victim, canonical, _icon = parse_signature(sig)
-        for pr in parsed_rows:
-            if pr.killer == killer and pr.victim == victim and pr.canonical == canonical:
-                return pr
-        return None
-
     def _process_strip_job(self, job: StripJob) -> None:
         try:
             with self._stats_lock:
@@ -380,16 +367,13 @@ class KillfeedPipeline:
             # Keep top→bottom order for FIFO diff
             parsed_rows.sort(key=lambda r: r.position)
 
-            new_sigs = self.state.diff_and_commit(signatures_from_rows(parsed_rows))
-            if not new_sigs:
+            new_rows = self.state.track_and_commit(parsed_rows, job.frame_num)
+            if not new_rows:
                 self._maybe_gc()
                 return
 
-            sig_to_row = {r.signature: r for r in parsed_rows}
-            for sig in new_sigs:
-                row = sig_to_row.get(sig) or self._find_row_for_sig(sig, parsed_rows)
-                if row is not None:
-                    self._emit_parsed_row(row, job)
+            for row in new_rows:
+                self._emit_parsed_row(row, job)
             self._maybe_gc()
         except Exception as exc:
             print(f"⚠️ Strip processing error: {type(exc).__name__}: {exc}")

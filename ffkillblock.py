@@ -53,6 +53,47 @@ except ImportError:
     YOLO_AVAILABLE = False
     print("⚠️ Ultralytics YOLO not available. Install with: pip install ultralytics")
 
+# ---------------------------------------------------------------------------
+# Current-match roster loader
+# Sirf match_roster.json update karo — yeh file kabhi mat chhedo.
+# Naya match = match_roster.json update karo, program restart karo. Done.
+# ---------------------------------------------------------------------------
+def _load_match_roster(json_path: str = "match_roster.json") -> list:
+    """Load player names from match_roster.json (same folder as this script).
+
+    File structure:
+      { "teams": [ { "players": [...], "sub": "..." }, ... ] }
+
+    Returns empty list if file is missing — program still works via TMS API roster.
+    """
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        full_path = os.path.join(base_dir, json_path)
+        with open(full_path, encoding="utf-8") as f:
+            data = json.load(f)
+        names: list = []
+        for team in data.get("teams", []):
+            for p in team.get("players", []):
+                if p and p.strip():
+                    namsaes.append(p.strip().upper())
+            sub = team.get("sub", "")
+            if sub and sub.strip():
+                names.append(sub.strip().upper())
+        if names:
+            print(f"✅ match_roster.json loaded: {len(names)} players from {len(data.get('teams', []))} teams")
+        else:
+            print("⚠️  match_roster.json: no players found — roster snap disabled, TMS API will be used")
+        return names
+    except FileNotFoundError:
+        print("⚠️  match_roster.json not found — match se pehle file banao (roster snap disabled)")
+        return []
+    except Exception as e:
+        print(f"⚠️  match_roster.json load error ({type(e).__name__}: {e}) — roster snap disabled")
+        return []
+
+
+MATCH_PLAYERS = _load_match_roster()
+
 # Import generated gRPC code
 try:
     import killfeed_detection_pb2
@@ -340,8 +381,8 @@ class KillblockDetector:
         self.max_visible_slots = int(queue_cfg.get("max_visible_slots", 4))
         self.cache_ttl_seconds = float(queue_cfg.get("cache_ttl_seconds", 45))
         self.pair_cooldown_seconds = float(queue_cfg.get("pair_cooldown_seconds", 10))
-        self.killfeed_log_path = "killfeed.log"
-        self.killfeed_jsonl_path = "killfeed_events.jsonl"
+        self.killfeed_log_path = logging_cfg.get("killfeed_log", "killfeed.log")
+        self.killfeed_jsonl_path = logging_cfg.get("killfeed_jsonl", "killfeed_events.jsonl")
         self.fifo_pipeline = None
         self.yolo_confidence = float(detection_cfg.get("confidence_threshold", 0.20))
         self.revive_confidence = float(detection_cfg.get("revive_confidence", 0.28))
@@ -379,6 +420,10 @@ class KillblockDetector:
         self.tms_players_list = []  # List of canonical player names from TMS
         self.tms_players_loaded = False
         Thread(target=self._load_tms_players_list, daemon=True, name="TMSPlayersLoad").start()
+
+        # Match-specific roster for high-accuracy OCR snapping (set via set_match_roster)
+        self._match_roster_names: list = []
+        self._match_roster_suffixes: dict = {}  # suffix_after_dot → full_name
         
         # Async processing pipeline (work queue in; min-heap orders saves out)
         self.detection_queue = Queue(maxsize=500)  # Large buffer for burst killfeeds
@@ -1218,6 +1263,82 @@ class KillblockDetector:
             print(f"⚠️  Error loading TMS players list: {type(e).__name__}")
             # Continue without TMS players list - will use raw OCR names
     
+    # ------------------------------------------------------------------
+    # Match-roster snapping  (zero-latency — ~60 rapidfuzz comparisons)
+    # ------------------------------------------------------------------
+
+    def set_match_roster(self, player_names):
+        """Load canonical player names for the current match.
+
+        Call once per match with the full list (all teams + subs).
+        Enables high-accuracy OCR correction without adding latency.
+
+        Args:
+            player_names: iterable of strings like ['K9.HUNNYSUNY', 'RNTX.ARSH17', ...]
+        """
+        names = [n.strip().upper() for n in player_names if n and n.strip()]
+        self._match_roster_names = names
+        # Pre-build suffix → full_name map for prefix-mangled OCR output
+        self._match_roster_suffixes = {}
+        for name in names:
+            if '.' in name:
+                suffix = name.split('.', 1)[1]
+                if len(suffix) >= 3:
+                    self._match_roster_suffixes[suffix] = name
+        # Also merge into tms_players_list so existing _fuzzy_match_player_name also benefits
+        merged = set(self.tms_players_list) | set(names)
+        self.tms_players_list = list(merged)
+        self.tms_players_loaded = True
+        print(f"✅ Match roster loaded: {len(names)} players")
+
+    def _snap_to_roster(self, name: str) -> str:
+        """Correct OCR noise by snapping name to the closest known match player.
+
+        Three-stage strategy (fastest first):
+          1. Exact match        — O(1)
+          2. WRatio full-name   — handles char substitutions, missing dot, extra chars
+          3. Suffix-only match  — handles mangled team prefix (e.g. 'K8.' → 'K9.')
+
+        Returns canonical player name on a confident hit, else the original string.
+        """
+        if not name or not RAPIDFUZZ_AVAILABLE:
+            return name
+
+        roster = self._match_roster_names
+        if not roster:
+            # Fall back to TMS API list if match roster not set yet
+            if self.tms_players_list:
+                roster = [n.upper() for n in self.tms_players_list]
+            else:
+                return name
+
+        name_upper = name.strip().upper()
+
+        # Stage 1: exact hit — free
+        if name_upper in roster:
+            return name_upper
+
+        # Stage 2: WRatio full-name (handles substitution + partial alignment)
+        result = process.extractOne(name_upper, roster, scorer=fuzz.WRatio)
+        if result and result[1] >= 75:
+            return result[0]
+
+        # Stage 3: suffix-only match (catches "K8.HUNNYSUNY" → "K9.HUNNYSUNY")
+        suffixes = self._match_roster_suffixes
+        if suffixes:
+            if '.' in name_upper:
+                ocr_suffix = name_upper.split('.', 1)[1]
+            else:
+                ocr_suffix = name_upper  # no dot at all — try raw suffix match
+            if len(ocr_suffix) >= 3:
+                suf_result = process.extractOne(
+                    ocr_suffix, list(suffixes.keys()), scorer=fuzz.WRatio
+                )
+                if suf_result and suf_result[1] >= 82:
+                    return suffixes[suf_result[0]]
+
+        return name  # no confident match — keep raw OCR
+
     def _fuzzy_match_player_name(self, ocr_name: str, min_similarity: float = 0.65) -> tuple:
         """
         Fuzzy match OCR-extracted name against TMS players list.
@@ -1248,7 +1369,7 @@ class KillblockDetector:
                 best_match = process.extractOne(
                     ocr_name_lower,
                     [p.lower() for p in self.tms_players_list],
-                    scorer=fuzz.ratio
+                    scorer=fuzz.WRatio
                 )
                 
                 if best_match:
@@ -1492,9 +1613,18 @@ class KillblockDetector:
             return "", "", 0.0
         killer, killer_sim, killer_matched = self._fuzzy_match_player_name(killer_raw)
         victim, victim_sim, victim_matched = self._fuzzy_match_player_name(victim_raw)
-        if killer_matched and killer != killer_raw:
+        # Second-pass roster snap: catches OCR noise not fixed by _fuzzy_match_player_name
+        killer_snapped = self._snap_to_roster(killer)
+        victim_snapped = self._snap_to_roster(victim)
+        if killer_snapped != killer:
+            print(f"   ✅ Killer snapped: '{killer}' → '{killer_snapped}'")
+            killer = killer_snapped
+        elif killer_matched and killer != killer_raw:
             print(f"   ✅ Killer matched: '{killer_raw}' → '{killer}' (similarity: {killer_sim:.2f})")
-        if victim_matched and victim != victim_raw:
+        if victim_snapped != victim:
+            print(f"   ✅ Victim snapped: '{victim}' → '{victim_snapped}'")
+            victim = victim_snapped
+        elif victim_matched and victim != victim_raw:
             print(f"   ✅ Victim matched: '{victim_raw}' → '{victim}' (similarity: {victim_sim:.2f})")
         return killer, victim, confidence
     
@@ -1578,14 +1708,9 @@ class KillblockDetector:
         self.cropkillblock_dir = os.path.join(base, "cropkillblock")
         os.makedirs(self.cropkillblock_dir, exist_ok=True)
 
-        self.killfeed_log_path = os.path.join(base, "killfeed.log")
-        self.killfeed_jsonl_path = os.path.join(base, "killfeed_events.jsonl")
-
         print(f"📁 New session folder: {base}/")
         print(f"   ├── KILL/ KNOCK/ REVIVE/ ELIMINATE/ CROPS/")
-        print(f"   ├── cropkillblock/")
-        print(f"   ├── killfeed.log")
-        print(f"   └── killfeed_events.jsonl")
+        print(f"   └── cropkillblock/")
         return base
     
     def _status_to_save_folder(self, status):
@@ -2057,7 +2182,9 @@ class KillblockDetector:
         """Run time-series FIFO killfeed pipeline until stop."""
         from killfeed.pipeline import KillfeedPipeline
 
-        print("🛡️  FIFO mode: one verified result per event — no raw UNKNOWN saves\n")
+        print("🛡️  FIFO mode: one verified result per event — no raw UNKNOWN saves")
+        print(f"📝 Killfeed log: {os.path.abspath(self.killfeed_log_path)}")
+        print(f"📝 Killfeed JSONL: {os.path.abspath(self.killfeed_jsonl_path)}\n")
         if self.ocr_subprocess is None:
             ocr_cfg = _load_app_config().get("ocr", {})
             if ocr_cfg.get("use_subprocess", True):
@@ -2126,10 +2253,6 @@ class KillblockDetector:
 
     def _on_fifo_killfeed_event(self, row, frame_num, sequence):
         """Push TMS first (speed), then save crop to disk."""
-        print(
-            f"✅ KILLFEED #{sequence}: {row.killer} → {row.victim} "
-            f"[{row.canonical}] icon={row.weapon}"
-        )
         if self.api_push_enabled:
             if self._is_name_cooldown_duplicate(row.killer, row.victim, row.tms_status):
                 print("   🚫 TMS duplicate skipped (name cooldown)")
@@ -2811,7 +2934,10 @@ def main():
             model_path=model_path,
             camera_index=camera_index,
         )
-        
+
+        # Load current-match roster for fast OCR snapping (zero latency impact)
+        detector.set_match_roster(MATCH_PLAYERS)
+
         # Check if initialization was successful
         if use_local:
             if detector.local_model is None:

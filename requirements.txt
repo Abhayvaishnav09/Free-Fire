@@ -11,3 +11,5 @@ scikit-learn
 requests
 grpcio
 grpcio-tools
+scipy
+rapidfuzz

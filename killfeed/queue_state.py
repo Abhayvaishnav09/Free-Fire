@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+from killfeed.tracker import ActiveTrackManager
+
+if TYPE_CHECKING:
+    from killfeed.parser import ParsedRow
 
 try:
     from rapidfuzz import fuzz
@@ -247,6 +252,14 @@ class PairCooldown:
         self._entries[self._key(killer, victim, canonical)] = time.time()
 
 
+def _rows_to_detections(rows: List["ParsedRow"]) -> List[tuple[str, str, str, str, float]]:
+    denom = max(len(rows), 1)
+    return [
+        (r.killer, r.victim, r.canonical, r.weapon, r.position / denom)
+        for r in rows
+    ]
+
+
 class KillfeedState:
     """Persistent FIFO state across OCR snapshots."""
 
@@ -256,6 +269,8 @@ class KillfeedState:
         cache_ttl_seconds: float = 30.0,
         pair_cooldown_seconds: float = 10.0,
         fuzzy_threshold: float = 90.0,
+        match_threshold: float = 0.60,
+        track_age_seconds: float = 8.0,
     ):
         self.max_visible_slots = max_visible_slots
         self.fuzzy_threshold = fuzzy_threshold
@@ -263,6 +278,14 @@ class KillfeedState:
         self.detected_cache = TTLDetectedCache(ttl_seconds=cache_ttl_seconds)
         self.pair_cooldown = PairCooldown(ttl_seconds=pair_cooldown_seconds)
         self.victim_cooldown = VictimEventCooldown(ttl_seconds=min(pair_cooldown_seconds, 4.0))
+        # Track age is intentionally short: killfeeds stay on screen for ~5-7s.
+        # Keeping tracks alive for 30s causes stale ghost tracks to accumulate
+        # and corrupt Hungarian matching over time.
+        self.track_manager = ActiveTrackManager(
+            max_age_seconds=track_age_seconds,
+            match_threshold=match_threshold,
+        )
+        self._tracker_initialized = False
         self.last_strip_dhash: Optional[str] = None
         self.sequence = 0
 
@@ -280,6 +303,25 @@ class KillfeedState:
         if new_slots or not _lists_fuzzy_equal(trimmed, self.previous_snapshot, self.fuzzy_threshold):
             self.previous_snapshot = list(trimmed)
         return new_slots
+
+    def track_and_commit(
+        self,
+        parsed_rows: List["ParsedRow"],
+        frame_num: int,
+    ) -> List["ParsedRow"]:
+        """Hungarian event tracking — emit only new or upgraded rows."""
+        trimmed = parsed_rows[: self.max_visible_slots]
+        if not trimmed:
+            return []
+
+        if not self._tracker_initialized:
+            self._tracker_initialized = True
+            detections = _rows_to_detections(trimmed)
+            self.track_manager.update(detections, frame_num)
+            return []
+
+        detections = _rows_to_detections(trimmed)
+        return self.track_manager.update(detections, frame_num, trimmed)
 
     def should_emit(self, killer: str, victim: str, canonical: str, event_hash: str) -> bool:
         if self.detected_cache.contains(event_hash):
