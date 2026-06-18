@@ -1,0 +1,115 @@
+{
+  "api": {
+    "backend_url": "https://beta-api-new.16score.com/api",
+    "yolo_api_url": "http://192.168.29.112:8000/api/v1/yolo/predict",
+    "yolo_api_key": "test-api-key-123",
+    "timeout": 10,
+    "max_retries": 2,
+    "fast_push": true
+  },
+  "grpc": {
+    "yolo_server": "127.0.0.1:50051",
+    "api_key": "dhruv@grpc16scoreai"
+  },
+  "endpoints": {
+    "match_info": "LeagueMatchData/LeagueMatch/info",
+    "team_players": "LeagueMatchData/LeagueMatch/LeagueMatchId/teams-players",
+    "killfeed": "LeagueMatchData/LeagueMatch/LeagueMatchId/killfeed",
+    "match_states": "LeagueMatch/getMatchStates/details",
+    "start_match": "LeagueMatch/startMatchById",
+    "user_login": "User/Login",
+    "user_from_token": "User/GetUserFromToken",
+    "user_tenants": "Tenant/CurrentUserTenants",
+    "get_leagues": "League/GetAllLeagues",
+    "today_matches": "LeagueMatch/getTodayLeagueMatch",
+    "league_groups": "LeagueGroup/getAllLeagueGroup",
+    "matches_by_league": "LeagueMatch/getMatchesByLeagueId"
+  },
+  "detection": {
+    "use_fifo_pipeline": true,
+    "capture_fps": 30,
+    "frame_buffer_seconds": 3,
+    "roi_change_threshold": 2.0,
+        "dhash_max_distance": 3,
+    "yolo_heartbeat_frames": 0,
+    "frame_capture_interval": 1,
+    "confidence_threshold": 0.20,
+        "revive_confidence": 0.15,
+    "sift_min_matches": 10,
+    "sift_match_ratio": 0.75,
+    "sift_features": 400,
+    "enable_stage_detection": false,
+    "max_queue_size": 60,
+    "process_alternate_frames": true
+  },
+  "ocr_queue": {
+    "max_size": 16,
+    "catchup_on_idle": false,
+    "fast_row0_emit": false
+  },
+  "queue": {
+    "max_visible_slots": 4,
+    "cache_ttl_seconds": 45,
+    "pair_cooldown_seconds": 10
+  },
+  "classification": {
+    "use_visual_icons_only": true,
+    "icon_template_dir": null,
+    "gun_template_dir": "gun_templates",
+    "save_unknown_gun_icons": true,
+    "note": "Icon analysis runs in OCR worker only — zero impact on capture speed. gun_template_dir: folder with per-gun PNG files (e.g. AK47.png). save_unknown_gun_icons: auto-save unmatched icon crops to gun_templates/unknown/ for labelling."
+  },
+  "ocr": {
+    "use_angle_cls": false,
+    "use_subprocess": true,
+    "lang": "en",
+    "log_detections": true
+  },
+  "camera": {
+    "default_width": 1920,
+    "default_height": 1080,
+    "default_index": 2,
+    "auto_detect": true,
+    "obs_device_name": "OBS Virtual Camera",
+    "prefer_obs_only": true
+  },
+  "processing": {
+    "image_quality": 85,
+    "image_resize_factor": 0.75,
+    "duplicate_check_count": 5,
+    "similarity_threshold_high": 0.90,
+    "similarity_threshold_low": 0.50,
+    "save_unverified_crops": true
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(levelname)s - %(message)s",
+    "killfeed_log": "killfeed.log",
+    "killfeed_jsonl": "killfeed_events.jsonl"
+  },
+  "api_weapons": [
+    "molotov-kill",
+    "molotov-knockout",
+    "carblast-knockout",
+    "carblast-kill",
+    "car-kill",
+    "car-knockout",
+    "car-blast-kill",
+    "car-blast-knockout",
+    "carblow-kill",
+    "carblow-knockout",
+    "grenade-knockout",
+    "grenade-kill",
+    "playzone-kill",
+    "playzone-knockout",
+    "self-knockout",
+    "self-kill",
+    "kill",
+    "knife-kill",
+    "pan-kill",
+    "pan-knockout",
+    "knife-knockout",
+    "knife-head-kill",
+    "knife-head-knockout"
+  ]
+} 
