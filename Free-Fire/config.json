@@ -68,11 +68,11 @@
     "log_rejects": true
   },
   "classification": {
-    "use_visual_icons_only": true,
+    "use_visual_icons_only": false,
     "icon_template_dir": null,
     "gun_template_dir": "gun_templates",
     "save_unknown_gun_icons": true,
-    "note": "Icon analysis runs in OCR worker only — zero impact on capture speed. gun_template_dir: folder with per-gun PNG files (e.g. AK47.png). save_unknown_gun_icons: auto-save unmatched icon crops to gun_templates/unknown/ for labelling."
+    "note": "Status from best (1).pt YOLO class only. Gun templates optional for gun_name label."
   },
   "ocr": {
     "use_angle_cls": false,
@@ -126,3 +126,11 @@
     "self-kill"
   ]
 } 
+
+
+
+
+
+
+
+

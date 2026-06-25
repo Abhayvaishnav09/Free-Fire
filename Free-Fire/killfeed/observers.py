@@ -133,17 +133,9 @@ def collect_observations(
     yolo_class: str | None = None,
     yolo_conf: float = 0.0,
 ) -> List[Observation]:
-    """Run every channel.  Robust to per-channel exceptions (returns abstain)."""
-    observers = (
-        lambda: yolo_observer(yolo_class, yolo_conf),
-        lambda: icon_observer(row_crop),
-        lambda: color_observer(row_crop),
-        lambda: status_icon_observer(row_crop),
-    )
-    out: List[Observation] = []
-    for run in observers:
-        try:
-            out.append(run())
-        except Exception as exc:  # never let one channel crash the row
-            out.append(_abstain("error", type(exc).__name__))
-    return out
+    """YOLO-only — best (1).pt class is the sole status signal."""
+    del row_crop
+    try:
+        return [yolo_observer(yolo_class, yolo_conf)]
+    except Exception as exc:
+        return [_abstain("error", type(exc).__name__)]

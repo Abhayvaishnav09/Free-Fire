@@ -888,8 +888,8 @@ class CameraSetupPyQt(ResponsiveWidget):
             if game == "freefire":
                 from score_ai.detection.freefire_bridge import obs_frame_capture as capture_fn
                 print(
-                    "[capture] Free Fire: ffkillblock.py + bestffmax.pt "
-                    "(YOLO loads first, OCR in background)",
+                    "[capture] Free Fire: streaming OBS frames to AI server "
+                    "(run: python3 serve_ff_desktop.py on AI machine)",
                     flush=True,
                 )
             else:

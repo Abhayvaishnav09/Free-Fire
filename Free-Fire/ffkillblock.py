@@ -23,7 +23,6 @@ import re
 import heapq
 import hashlib
 from collections import deque
-from text import FreeFireTextDetector
 import json
 import base64
 import requests
@@ -382,8 +381,9 @@ class KillblockDetector:
         self.max_visible_slots = int(queue_cfg.get("max_visible_slots", 4))
         self.cache_ttl_seconds = float(queue_cfg.get("cache_ttl_seconds", 45))
         self.pair_cooldown_seconds = float(queue_cfg.get("pair_cooldown_seconds", 10))
-        self.killfeed_log_path = "killfeed.log"
-        self.killfeed_jsonl_path = "killfeed_events.jsonl"
+        _server_root = os.path.dirname(os.path.abspath(__file__))
+        self.killfeed_log_path = os.path.join(_server_root, "killfeed.log")
+        self.killfeed_jsonl_path = os.path.join(_server_root, "killfeed_events.jsonl")
         self.fifo_pipeline = None
         self.yolo_confidence = float(detection_cfg.get("confidence_threshold", 0.20))
         self.revive_confidence = float(detection_cfg.get("revive_confidence", 0.28))
@@ -680,6 +680,7 @@ class KillblockDetector:
         """Initialize OCR text detector with simplified error handling."""
         print("🔍 Initializing OCR...")
         try:
+            from text import FreeFireTextDetector
             import paddleocr
             detector = FreeFireTextDetector()
             print("✅ OCR initialized successfully")
@@ -1580,21 +1581,10 @@ class KillblockDetector:
         return base
     
     def _status_to_save_folder(self, status):
-        """Map classified status to folder name and filename label."""
-        normalized = (status or "").lower().strip()
-        if normalized in ("revive", "revived") or "revive" in normalized:
-            return "REVIVE", "REVIVED"
-        if normalized in ("gun knockout", "knockout", "knock", "knocked"):
-            return "KNOCK", "KNOCK"
-        if "knockout" in normalized or "-knockout" in normalized:
-            return "KNOCK", "KNOCK"
-        if normalized == "kill":
-            return "KILL", "KILL"
-        if "kill" in normalized or "elimination" in normalized:
-            return "KILL", "KILL"
-        if normalized in ("eliminate", "eliminated", "elimination"):
-            return "ELIMINATE", "ELIMINATE"
-        return None, None
+        """Map best (1).pt / TMS status to folder name and filename label."""
+        from killfeed.yolo_classes import status_to_save_folder
+
+        return status_to_save_folder(status)
     
     def _is_verified_killfeed(self, result):
         """True only when OCR names and status classification are both complete."""
@@ -2061,9 +2051,15 @@ class KillblockDetector:
         if self.ocr_subprocess is None and ocr_cfg.get("use_subprocess", True):
             from killfeed.ocr_subprocess import SubprocessOCRPool
 
+            ocr_min = self.ocr_workers_min
+            ocr_max = self.ocr_workers_max
+            if os.environ.get("FF_FROM_DESKTOP") == "1":
+                ocr_min = min(ocr_min, 1)
+                ocr_max = min(ocr_max, 2)
+
             self.ocr_subprocess = SubprocessOCRPool(
-                min_workers=self.ocr_workers_min,
-                max_workers=self.ocr_workers_max,
+                min_workers=ocr_min,
+                max_workers=ocr_max,
             )
             print("[AI] Warming up OCR models (one-time load)...", flush=True)
             try:
@@ -2811,7 +2807,7 @@ def run_obs_capture(
     stop_flag=None,
     use_local_model=True,
     grpc_port=50051,
-    model_path="bestffmax.pt",
+    model_path="best (1).pt",
 ):
     """
     Public API called by freefire_bridge.py (desktop app).
@@ -2879,8 +2875,6 @@ def run_remote_ai_session(
             os.path.join(root, "models", "freefire", os.path.basename(model_path)),
             os.path.join(root, "best (1).pt"),
             os.path.join(root, "..", "16score-desktop", "best (1).pt"),
-            os.path.join(root, "..", "16score-desktop", "bestffmax.pt"),
-            os.path.join(root, "..", "16score-desktop", "16score-desktop", "best.pt"),
         ):
             if os.path.isfile(candidate):
                 model_path = candidate
@@ -2925,6 +2919,34 @@ def run_remote_ai_session(
     print(f"[AI] Roster: {roster_n} players {'✅' if roster_n else '⚠️  (empty — OCR names pass through)'}", flush=True)
     print(f"[AI] ✅ Ready to process — streaming detection active", flush=True)
     detector._run_fifo_pipeline_loop(capture_override=remote_cap)
+
+
+def _desktop_capture_main() -> None:
+    """Entry when 16score-desktop spawns ffkillblock as an isolated subprocess."""
+    match_id = os.environ.get("FF_MATCH_ID", "1")
+    access_token = os.environ.get("FF_ACCESS_TOKEN") or None
+    if access_token == "":
+        access_token = None
+    try:
+        camera_index = int(os.environ.get("FF_CAMERA_INDEX", "2"))
+    except ValueError:
+        camera_index = 2
+    model_path = os.environ.get("FF_MODEL_PATH", "best (1).pt")
+    use_local = os.environ.get("FF_USE_LOCAL", "1") == "1"
+    try:
+        grpc_port = int(os.environ.get("FF_GRPC_PORT", "50051"))
+    except ValueError:
+        grpc_port = 50051
+
+    run_obs_capture(
+        match_id=match_id,
+        access_token=access_token,
+        camera_index=camera_index,
+        stop_flag=None,
+        use_local_model=use_local,
+        grpc_port=grpc_port,
+        model_path=model_path,
+    )
 
 
 def main():
@@ -2997,4 +3019,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Free Fire killfeed detector")
+    parser.add_argument(
+        "--desktop-capture",
+        action="store_true",
+        help="Run OBS capture (spawned by 16score-desktop)",
+    )
+    args = parser.parse_args()
+    if args.desktop_capture:
+        _desktop_capture_main()
+    else:
+        main()

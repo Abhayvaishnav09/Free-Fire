@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionServiceServicer):
     """gRPC service implementation for killfeed detection."""
     
-    def __init__(self, model_path="best.pt"):
+    def __init__(self, model_path="best (1).pt"):
         """Initialize the killfeed detection servicer."""
         logger.info("🔧 Initializing Killfeed Detection Servicer...")
         self.model = self._load_model(model_path)
@@ -371,26 +371,17 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
     }
 
     def _determine_status_from_class(self, full_frame, cropped_image, yolo_class):
-        """Use YOLO class name for status when specific; fall back to color for 'killblock'.
-        
-        This avoids the expensive triple-YOLO-inference color analysis path for the
-        majority of detections where the model already tells us the event type.
-        
-        Returns:
-            tuple: (status, detection_sources)
-        """
-        yolo_class = (yolo_class or "killblock").lower()
-        
-        # Specific YOLO class → direct status mapping (fast path)
-        if yolo_class != "killblock" and yolo_class in self._CLASS_TO_STATUS:
-            # BYPASS MAPPING LAYER: return the raw YOLO class directly
-            status = yolo_class
-            sources = [f"YOLO class (BYPASS): {yolo_class}"]
-            logger.info(f"✅ STATUS: {status} (YOLO class={yolo_class}, bypass fast path)")
-            return status, sources
-        
-        # Generic killblock → fall back to color analysis (legacy path)
-        return self._determine_status(full_frame, cropped_image)
+        """Status from best (1).pt YOLO class only — no color fallback."""
+        del full_frame, cropped_image
+        from killfeed.yolo_classes import yolo_class_to_tms_status
+
+        status = yolo_class_to_tms_status(yolo_class)
+        if status:
+            cls = (yolo_class or "").lower()
+            logger.info(f"✅ STATUS: {status} (YOLO class={cls})")
+            return status, [f"YOLO: {cls}"]
+        logger.debug("⚪ No confident YOLO class for status (generic killblock or unknown)")
+        return "unknown", ["no_confident_yolo_class"]
     
     def _determine_status(self, full_frame, cropped_image):
         """
@@ -1135,7 +1126,7 @@ class KillfeedDetectionServicer(killfeed_detection_pb2_grpc.KillfeedDetectionSer
             return "UNKNOWN"
 
 
-def serve(model_path="best.pt", port=50051, max_workers=10):
+def serve(model_path="best (1).pt", port=50051, max_workers=10):
     """
     Start the gRPC server. Server runs continuously until user stops it (Ctrl+C).
     Handles long processing times gracefully and continues running.
@@ -1263,7 +1254,7 @@ def serve(model_path="best.pt", port=50051, max_workers=10):
     logger.info("🔄 Server loop ended")
 
 
-def start_server_in_background(model_path="best.pt", port=50051):
+def start_server_in_background(model_path="best (1).pt", port=50051):
     """
     Start the gRPC server in a background process.
     
@@ -1299,7 +1290,7 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser(description='gRPC Killfeed Detection Server')
     parser.add_argument('--serve', action='store_true', help='Start the gRPC server')
-    parser.add_argument('--model', default='best.pt', help='Path to YOLO model file')
+    parser.add_argument('--model', default='best (1).pt', help='Path to YOLO model file (best (1).pt)')
     parser.add_argument('--port', type=int, default=50051, help='Port number for the server')
     parser.add_argument('--max-workers', type=int, default=10, help='Maximum number of concurrent workers')
     
@@ -1315,4 +1306,4 @@ if __name__ == '__main__':
             sys.exit(1)
     else:
         print("Use --serve flag to start the server")
-        print("Example: python grpc_block.py --serve --model best.pt --port 50051")
+        print("Example: python grpc_block.py --serve --model \"best (1).pt\" --port 50051")

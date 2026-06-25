@@ -64,7 +64,7 @@ class KillblockDetector:
     GRPC_SERVER_HOST = "localhost"
     
     def __init__(self, match_id="1", access_token=None, api_enabled=True, grpc_port=50051, 
-                 use_local_model=True, model_path="best.pt", camera_index=None, stop_flag=None):
+                 use_local_model=True, model_path="best (1).pt", camera_index=None, stop_flag=None):
         """Initialize detector with local or gRPC processing, OCR, and API configuration.
         
         Args:
@@ -3101,12 +3101,12 @@ def run_obs_capture(
     stop_flag=None,
     use_local_model=True,
     grpc_port=50051,
-    model_path="best.pt",
+    model_path="best (1).pt",
 ):
     """
     Entry point for 16score-desktop when Free Fire is selected.
 
-    Runs ffkillblock.py with the local YOLO model (best.pt by default).
+    Runs ffkillblock.py with the local YOLO model (best (1).pt by default).
     """
     print(
         f"[ffkillblock] match={match_id} | camera={camera_index} | "
@@ -3145,7 +3145,7 @@ def main():
     
     # Ask for processing mode
     use_local = input("Use local model? (Y/n, default: Y): ").strip().lower() != 'n'
-    model_path = "best.pt"
+    model_path = "best (1).pt"
     if use_local:
         custom_model = input(f"Model path (or press Enter for '{model_path}'): ").strip()
         if custom_model:

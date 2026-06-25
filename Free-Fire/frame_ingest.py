@@ -39,6 +39,9 @@ def frames_received():
 
 
 class FrameIngestServicer(killfeed_detection_pb2_grpc.FrameIngestServiceServicer):
+    def __init__(self, frame_queue=None):
+        self._frame_queue = frame_queue
+
     def SendFrame(self, request, context):
         global _latest_frame, _frames_received
         try:
@@ -52,6 +55,18 @@ class FrameIngestServicer(killfeed_detection_pb2_grpc.FrameIngestServiceServicer
                 _latest_frame = frame
                 _frames_received += 1
             _frame_event.set()
+            if self._frame_queue is not None:
+                try:
+                    self._frame_queue.put_nowait(frame)
+                except Exception:
+                    try:
+                        self._frame_queue.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        self._frame_queue.put_nowait(frame)
+                    except Exception:
+                        pass
             return killfeed_detection_pb2.FrameAck(success=True)
         except Exception as exc:
             logger.error("Frame ingest error: %s", exc)
@@ -59,9 +74,10 @@ class FrameIngestServicer(killfeed_detection_pb2_grpc.FrameIngestServiceServicer
 
 
 class FrameIngestServer:
-    def __init__(self, port=50052, max_workers=4):
+    def __init__(self, port=50052, max_workers=4, frame_queue=None):
         self.port = port
         self.max_workers = max_workers
+        self.frame_queue = frame_queue
         self._server = None
         self._thread = None
 
@@ -79,7 +95,7 @@ class FrameIngestServer:
             options=options,
         )
         killfeed_detection_pb2_grpc.add_FrameIngestServiceServicer_to_server(
-            FrameIngestServicer(), self._server
+            FrameIngestServicer(frame_queue=self.frame_queue), self._server
         )
         self._server.add_insecure_port(f"0.0.0.0:{self.port}")
         self._server.start()

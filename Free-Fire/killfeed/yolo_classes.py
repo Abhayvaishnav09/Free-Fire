@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from killfeed.tms_map import canonical_to_tms
-
 # All row-detection classes emitted by best (1).pt (YOLO12m, 17 classes).
 ALL_ROW_CLASSES = frozenset({
     "player-skill-kill",
@@ -110,6 +108,47 @@ def lookup_spec(yolo_class: str | None) -> Optional[YoloClassSpec]:
     return _YOLO_SPECS.get(normalize_class_name(yolo_class))
 
 
+def yolo_class_to_tms_status(yolo_class: str | None) -> str | None:
+    """API/TMS status from best (1).pt class label only (no color/icon fallback)."""
+    spec = lookup_spec(yolo_class)
+    if spec is None or not spec.confident:
+        return None
+    cls = normalize_class_name(yolo_class)
+    if cls == "revive":
+        return "revived"
+    return cls
+
+
+def status_to_save_folder(status: str | None) -> tuple[str | None, str | None]:
+    """Map best (1).pt / TMS status string to session subfolder."""
+    if not status:
+        return None, None
+
+    spec = lookup_spec(status)
+    if spec and spec.confident:
+        if spec.event_type == "revive":
+            return "REVIVE", "REVIVED"
+        if spec.event_type == "knock":
+            return "KNOCK", "KNOCK"
+        if spec.event_type == "elimination":
+            return "KILL", "KILL"
+
+    normalized = (status or "").lower().strip()
+    if normalized in ("revive", "revived") or "revive" in normalized:
+        return "REVIVE", "REVIVED"
+    if normalized.endswith("-knock") or normalized in (
+        "knock",
+        "knocked",
+        "gun knockout",
+        "knockout",
+    ) or "knockout" in normalized:
+        return "KNOCK", "KNOCK"
+    if normalized.endswith("-kill") or normalized in ("kill", "eliminate", "eliminated", "elimination"):
+        return "KILL", "KILL"
+    if "elimination" in normalized:
+        return "ELIMINATE", "ELIMINATE"
+    return None, None
+
 def classify_from_yolo(
     yolo_class: str | None,
     yolo_conf: float = 0.0,
@@ -121,23 +160,20 @@ def classify_from_yolo(
     if spec is None:
         return None
 
-    # BYPASS MAPPING LAYER: Use raw YOLO class directly as the final status
-    # This allows evaluating the model's native performance directly in the UI.
-    tms = yolo_class if yolo_class else "unknown"
+    tms = yolo_class_to_tms_status(yolo_class)
 
-    # ── STATUS TRACE: YOLO class → spec → TMS ──
     print(
         f"🔬 STATUS_TRACE [yolo_classes] "
         f"YOLO_CLASS={yolo_class!r} → spec.canonical={spec.canonical!r} "
-        f"→ TMS_STATUS (BYPASS)={tms!r} confident={spec.confident}"
+        f"→ TMS_STATUS={tms!r} confident={spec.confident}"
     )
 
-    if not spec.confident:
+    if tms is None:
         return ClassificationResult(
             event_type=spec.event_type,
             kill_type=spec.kill_type,
             canonical=spec.canonical,
-            tms_status=tms,
+            tms_status="",
             icon_category=spec.icon_category,
             confident=False,
             gun_name="unknown",

@@ -12,6 +12,19 @@ import cv2
 import numpy as np
 
 
+def _mp_context():
+    """Prefer fork on Linux — safer when OCR pool starts from worker threads."""
+    import sys
+    from multiprocessing import get_context
+
+    if sys.platform == "linux":
+        try:
+            return get_context("fork")
+        except ValueError:
+            pass
+    return get_context("spawn")
+
+
 def _ocr_worker(request_q: Queue, response_q: Queue) -> None:
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -61,7 +74,7 @@ class SubprocessOCRProvider:
                 self._proc.join(timeout=0.5)
             except Exception:
                 pass
-        ctx = get_context("spawn")
+        ctx = _mp_context()
         self._req_q = ctx.Queue(maxsize=4)
         self._resp_q = ctx.Queue(maxsize=4)
         self._proc = ctx.Process(
