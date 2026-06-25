@@ -1,0 +1,55 @@
+# 16Score AI - Environment Variables Template
+# ============================================
+# 
+# INSTRUCTIONS:
+# 1. Copy this file to .env in the project root
+# 2. Fill in your actual values
+# 3. NEVER commit .env to version control!
+#
+# The .env file is already in .gitignore for your protection.
+
+# ===========================================
+# API Configuration
+# ===========================================
+
+# Backend API URL (use HTTPS in production!)
+SCORE_API_URL=https://webapi.16score.com
+
+# API request timeout in seconds
+SCORE_API_TIMEOUT=30
+
+# ===========================================
+# gRPC Killfeed Detection Service
+# ===========================================
+
+# gRPC server address (host:port)
+SCORE_GRPC_SERVER=127.0.0.1:50050
+
+# gRPC API key for authentication
+SCORE_GRPC_API_KEY=your-grpc-api-key-here
+
+# Enable TLS for gRPC (true/false)
+SCORE_GRPC_USE_TLS=false
+
+# Path to TLS certificate (if using TLS)
+# SCORE_GRPC_TLS_CERT=/path/to/cert.pem
+
+# ===========================================
+# OCR Service (if using separate OCR API)
+# ===========================================
+
+# OCR API key
+SCORE_OCR_API_KEY=your-ocr-api-key-here
+
+# ===========================================
+# Security Settings
+# ===========================================
+
+# Enable HTTPS enforcement (true/false)
+# When true, app will warn if using HTTP URLs
+SCORE_ENFORCE_HTTPS=true
+
+# Enable debug mode (true/false)
+# WARNING: Never enable in production!
+SCORE_DEBUG=false
+

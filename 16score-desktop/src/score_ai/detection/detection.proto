@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package sixteenscore.killfeed;
+
+// Killfeed Detection Service
+service KillfeedDetection {
+  rpc Detect (DetectRequest) returns (DetectResponse);
+}
+
+message DetectRequest {
+  bytes image = 1;
+  bool enable_ocr = 2;
+}
+
+message TextSegment {
+  string text = 1;
+  float confidence = 2;
+  repeated float bounding_box = 3;
+}
+
+message KillfeedEntry {
+  int32 class_id = 1;
+  string kill_type = 2;
+  float confidence = 3;
+  repeated float bounding_box = 4;
+  string cropped_image_url = 5;
+  repeated TextSegment text_segments = 6;
+  string combined_text = 7;
+}
+
+message DetectResponse {
+  repeated KillfeedEntry entries = 1;
+  float ocr_time_ms = 2;
+}
+
+

@@ -1,0 +1,100 @@
+{
+  "api": {
+    "backend_url": "http://192.168.1.11:5006",
+    "timeout": 30
+  },
+  "grpc": {
+    "killfeed_server": "127.0.0.1:50050",
+    "api_key": "YOUR_GRPC_API_KEY_HERE",
+    "use_tls": false,
+    "tls_cert_path": ""
+  },
+  "endpoints": {
+    "match_info": "LeagueMatchData/LeagueMatch/info",
+    "team_players": "LeagueMatchData/LeagueMatch/LeagueMatchId/teams-players",
+    "killfeed": "LeagueMatchData/LeagueMatch/LeagueMatchId/killfeed",
+    "match_states": "LeagueMatch/getMatchStates/details",
+    "start_match": "LeagueMatch/startMatchById",
+    "user_login": "User/Login",
+    "user_from_token": "User/GetUserFromToken",
+    "user_tenants": "Tenant/CurrentUserTenants",
+    "get_leagues": "League/GetAllLeagues",
+    "today_matches": "LeagueMatch/getTodayLeagueMatch",
+    "league_groups": "LeagueGroup/getAllLeagueGroup",
+    "matches_by_league": "LeagueMatch/getMatchesByLeagueId"
+  },
+  "detection": {
+    "frame_capture_interval": 0.12,
+    "confidence_threshold": 0.20,
+    "sift_min_matches": 10,
+    "sift_match_ratio": 0.75,
+    "sift_features": 400,
+    "enable_stage_detection": false,
+    "max_queue_size": 100,
+    "process_alternate_frames": false,
+    "frame_queue_drop_oldest_when_full": true,
+    "num_grpc_worker_threads": 4,
+    "killfeed_api_pool_workers": 5,
+    "grpc_input_width": 1280,
+    "grpc_input_height": 720,
+    "grpc_jpeg_quality": 90,
+    "grpc_use_compression": false,
+    "log_grpc_ocr_table": false,
+    "killfeed_roi_enabled": false,
+    "killfeed_roi": [0.62, 0.0, 1.0, 0.42],
+    "killfeed_roi_min_size_px": 32
+  },
+  "ocr": {
+    "use_angle_cls": false,
+    "lang": "en",
+    "log_detections": false,
+    "api_url": "http://localhost:8000/ocr",
+    "api_key": "YOUR_OCR_API_KEY_HERE"
+  },
+  "camera": {
+    "default_width": 1920,
+    "default_height": 1080,
+    "default_index": 1
+  },
+  "processing": {
+    "image_quality": 92,
+    "image_resize_factor": 0.75,
+    "duplicate_check_count": 5,
+    "similarity_threshold_high": 0.90,
+    "similarity_threshold_low": 0.50
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(levelname)s - %(message)s"
+  },
+  "security": {
+    "enforce_https": true,
+    "use_secure_storage": true
+  },
+  "api_weapons": [
+    "molotov-kill",
+    "molotov-knockout",
+    "carblast-knockout",
+    "carblast-kill",
+    "car-kill",
+    "car-knockout",
+    "car-blast-kill",
+    "car-blast-knockout",
+    "carblow-kill",
+    "carblow-knockout",
+    "grenade-knockout",
+    "grenade-kill",
+    "playzone-kill",
+    "playzone-knockout",
+    "self-knockout",
+    "self-kill",
+    "kill",
+    "knife-kill",
+    "pan-kill",
+    "pan-knockout",
+    "knife-knockout",
+    "knife-head-kill",
+    "knife-head-knockout"
+  ]
+}
+

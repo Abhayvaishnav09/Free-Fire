@@ -1,0 +1,150 @@
+{
+      "players": [
+        "4END.ARIJEET",
+        "4END.AVJIT",
+        "4END.CYBER",
+        "4END.RAICHU",
+        "4END.SURYA",
+        "ARZ.FLIX24",
+        "ARZ.JOHAN",
+        "ARZ.KUNAL10",
+        "ARZ.MADGOD",
+        "ARZ.PRODIGY",
+        "EMZ.ADITYA",
+        "EMZ.MAC",
+        "EMZ.MRANI",
+        "EMZ.RUPESH",
+        "EMZ.SID18",
+        "GGI.PATLU",
+        "GGI.POWER",
+        "GGI.RABARI11",
+        "GGI.SWARUP",
+        "GGI.TIGER",
+        "GODL.ECOECO",
+        "GODL.MARCO",
+        "GODL.NANCY",
+        "GODL.NOBITA",
+        "GODL.YOGI",
+        "IQOG.AAYUSH4",
+        "IQOG.ARJUN",
+        "IQOG.KRISH",
+        "IQOG.LEGEND",
+        "IQOG.PANDAT",
+        "K9.AIM84",
+        "K9.DAAFIQ",
+        "K9.HUNNYSUNY",
+        "K9.ZIYANN",
+        "K9.ZORO",
+        "MNZ.ANSHU26",
+        "MNZ.GINOTRA",
+        "MNZ.JARVIS16",
+        "MNZ.RNS",
+        "MNZ.ZAP",
+        "RGE.ASH",
+        "RGE.HEMU",
+        "RGE.LEVELUP",
+        "RGE.SABOS",
+        "RGE.WILDFOX9",
+        "RNTX.ARSH17",
+        "RNTX.BLACK",
+        "RNTX.ROSHAN",
+        "RNTX.VINCENT",
+        "RNTX.XDIVINE",
+        "TT.KHONSHU",
+        "TT.KOWSIK24",
+        "TT.RAIN21",
+        "TT.SCRIPT18",
+        "TT.YOGESH23",
+        "WIND.BRAVE",
+        "WIND.GOKUL",
+        "WIND.JANGO",
+        "WIND.KINGSTN",
+        "WIND.NYM"
+      ],
+      "teams": {
+        "4END": [
+          "4END.ARIJEET",
+          "4END.AVJIT",
+          "4END.CYBER",
+          "4END.RAICHU",
+          "4END.SURYA"
+        ],
+        "ARZ": [
+          "ARZ.FLIX24",
+          "ARZ.JOHAN",
+          "ARZ.KUNAL10",
+          "ARZ.MADGOD",
+          "ARZ.PRODIGY"
+        ],
+        "EMZ": [
+          "EMZ.ADITYA",
+          "EMZ.MAC",
+          "EMZ.MRANI",
+          "EMZ.RUPESH",
+          "EMZ.SID18"
+        ],
+        "GGI": [
+          "GGI.PATLU",
+          "GGI.POWER",
+          "GGI.RABARI11",
+          "GGI.SWARUP",
+          "GGI.TIGER"
+        ],
+        "GODL": [
+          "GODL.ECOECO",
+          "GODL.MARCO",
+          "GODL.NANCY",
+          "GODL.NOBITA",
+          "GODL.YOGI"
+        ],
+        "IQOG": [
+          "IQOG.AAYUSH4",
+          "IQOG.ARJUN",
+          "IQOG.KRISH",
+          "IQOG.LEGEND",
+          "IQOG.PANDAT"
+        ],
+        "K9": [
+          "K9.AIM84",
+          "K9.DAAFIQ",
+          "K9.HUNNYSUNY",
+          "K9.ZIYANN",
+          "K9.ZORO"
+        ],
+        "MNZ": [
+          "MNZ.ANSHU26",
+          "MNZ.GINOTRA",
+          "MNZ.JARVIS16",
+          "MNZ.RNS",
+          "MNZ.ZAP"
+        ],
+        "RGE": [
+          "RGE.ASH",
+          "RGE.HEMU",
+          "RGE.LEVELUP",
+          "RGE.SABOS",
+          "RGE.WILDFOX9"
+        ],
+        "RNTX": [
+          "RNTX.ARSH17",
+          "RNTX.BLACK",
+          "RNTX.ROSHAN",
+          "RNTX.VINCENT",
+          "RNTX.XDIVINE"
+        ],
+        "TT": [
+          "TT.KHONSHU",
+          "TT.KOWSIK24",
+          "TT.RAIN21",
+          "TT.SCRIPT18",
+          "TT.YOGESH23"
+        ],
+        "WIND": [
+          "WIND.BRAVE",
+          "WIND.GOKUL",
+          "WIND.JANGO",
+          "WIND.KINGSTN",
+          "WIND.NYM"
+        ]
+      }
+    }

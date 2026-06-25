@@ -1,0 +1,13 @@
+opencv-python
+torch
+torchvision
+Pillow
+numpy
+paddlepaddle
+paddleocr
+streamlit
+ultralytics
+scikit-learn
+requests
+grpcio
+grpcio-tools

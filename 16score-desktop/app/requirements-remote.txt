@@ -1,0 +1,7 @@
+# Screen capture → AI (Linux or Windows). No pywin32, no GUI deps.
+grpcio
+opencv-python
+numpy
+mss
+Pillow
+pyautogui; sys_platform == "win32"

@@ -1,0 +1,39 @@
+# 16Score requirements
+# OCR is now handled by gRPC server - no local PaddleOCR needed
+
+# Core dependencies
+PyQt5>=5.15.0
+requests>=2.25.0
+opencv-python>=4.5.0
+numpy>=1.21.0
+Pillow>=9.0.0
+
+# gRPC for YOLO + OCR server communication (must match generated *_pb2_grpc.py files)
+grpcio>=1.80.0
+grpcio-tools>=1.80.0
+
+# Player name matching
+rapidfuzz>=2.0.0
+
+# Async API calls
+aiohttp>=3.8.0
+
+# Free Fire local killfeed detection (ffkillblock.py)
+ultralytics>=8.0.0
+easyocr>=1.7.0
+
+# Config and utilities
+pyyaml>=6.0
+
+# Security
+python-dotenv>=1.0.0
+keyring>=24.0.0
+
+# Version comparison for auto-updates
+packaging>=21.0
+
+# Crash reporting (optional but recommended)
+sentry-sdk>=1.0.0
+
+# Optional - for building executables
+# pyinstaller>=4.0

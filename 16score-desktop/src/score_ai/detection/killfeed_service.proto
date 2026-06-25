@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package killfeed;
+
+// Killfeed Detection Service - AI-powered kill feed analysis for esports scoring
+service KillfeedDetectionService {
+  // Analyze a frame for kill feed detections with optional OCR
+  rpc Predict (PredictRequest) returns (PredictResponse);
+}
+
+message PredictRequest {
+  bytes image = 1;
+  bool enable_ocr = 2;  // Enable OCR text extraction on detected regions
+}
+
+// OCR text detected within a killfeed region
+message OCRText {
+  string text = 1;
+  float confidence = 2;
+  repeated float bbox = 3;  // [x1, y1, x2, y2] relative to detection bbox
+}
+
+message Detection {
+  int32 class_id = 1;
+  string class_name = 2;
+  float confidence = 3;
+  repeated float bbox = 4; // [x1, y1, x2, y2]
+  string cropped_image_url = 5;
+  repeated OCRText ocr_texts = 6;  // Extracted text from this killfeed region
+  string combined_text = 7;  // All OCR text combined (e.g., "PlayerA killed PlayerB")
+}
+
+message PredictResponse {
+  repeated Detection detections = 1;
+  float ocr_time_ms = 2;  // OCR processing time in milliseconds
+}
+

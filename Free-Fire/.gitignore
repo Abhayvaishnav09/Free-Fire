@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Project specific - Large model files
+*.pt  # YOLO model files (usually large - exclude from git)
+best_*.pt  # Alternative model files
+
+# Generated outputs (cropkillblock images)
+cropkillblock/*.png
+cropkillblock/*.jpg
+sessions/
+
+# Screenshot images
+Screenshot*.png
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+local_config.json
+.desktop_session.json
+killfeed_run.log
+
+# PaddleOCR cache (if any)
+.paddleocr/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Model checkpoints and weights
+*.weights
+*.onnx
+*.pth
+*.h5
+
